@@ -1,0 +1,23 @@
+[package]
+name = "klip"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossbeam-channel = "0.5.17"
+eframe = "0.36"
+egui = "0.36"
+egui-phosphor = { version = "0.14", features = ["regular", "bold", "fill"] }
+rfd = "0.17"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+# Keep debug builds snappy: our code lightly optimised, dependencies fully.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
