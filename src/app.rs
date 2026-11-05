@@ -19,6 +19,15 @@ pub enum Selection {
     Video(Id),
     Text(Id),
     Audio(Id),
+    /// The transition after this main-track clip.
+    Transition(Id),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum VideoTab {
+    Basic,
+    Adjust,
+    Audio,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,6 +36,8 @@ pub enum LeftTab {
     Audio,
     Text,
     Captions,
+    Transitions,
+    Filters,
 }
 
 /// Payload for dragging a library item onto the timeline.
@@ -40,6 +51,10 @@ pub struct AudioDrag(pub Id);
 #[derive(Default)]
 pub struct Assets {
     pub thumb: Option<TextureHandle>,
+    /// Ungraded thumbnail pixels, for building filter previews.
+    pub thumb_raw: Option<Frame>,
+    /// Thumbnail with each filter applied (built lazily by the Filters tab).
+    pub filtered: HashMap<crate::fx::FilterPreset, TextureHandle>,
     pub strip: Vec<(f64, TextureHandle)>,
     pub wave: Option<Arc<Vec<f32>>>,
 }
@@ -107,6 +122,8 @@ pub enum TlDrag {
 
 pub struct TimelineView {
     pub pps: f32,
+    /// Smallest zoom: the whole project fits on screen (updated each frame).
+    pub min_pps: f32,
     pub scroll: f64,
     pub drag: TlDrag,
     pub snap_line: Option<f64>,
@@ -120,6 +137,42 @@ pub struct ExportUi {
     pub job: Option<ExportJob>,
 }
 
+/// One preview layer: the latest raw frame for a clip and its graded texture.
+pub struct Layer {
+    pub tex: Option<TextureHandle>,
+    pub blur: Option<TextureHandle>,
+    pub media: Option<Id>,
+    pub clip: Option<Id>,
+    raw: Option<Frame>,
+    graded: Option<crate::fx::Adjust>,
+    requested: Option<(Id, i64)>,
+    grabber: Grabber,
+}
+
+impl Layer {
+    fn new(ctx: egui::Context) -> Self {
+        Self { tex: None, blur: None, media: None, clip: None, raw: None, graded: None, requested: None, grabber: Grabber::new(ctx) }
+    }
+
+    /// (Re)build the textures from the raw frame with `grade` applied.
+    fn upload(&mut self, ctx: &egui::Context, grade: crate::fx::Adjust) {
+        let Some(raw) = &self.raw else { return };
+        let mut f = raw.clone();
+        grade.apply(&mut f.rgba);
+        let img = to_image(&f);
+        match &mut self.tex {
+            Some(t) => t.set(img, TextureOptions::LINEAR),
+            None => self.tex = Some(ctx.load_texture("preview_layer", img, TextureOptions::LINEAR)),
+        }
+        let tiny = to_image(&media::tiny_blur(&f, 40));
+        match &mut self.blur {
+            Some(t) => t.set(tiny, TextureOptions::LINEAR),
+            None => self.blur = Some(ctx.load_texture("preview_layer_blur", tiny, TextureOptions::LINEAR)),
+        }
+        self.graded = Some(grade);
+    }
+}
+
 pub struct KlipApp {
     pub project: Project,
     pub project_path: Option<PathBuf>,
@@ -131,9 +184,13 @@ pub struct KlipApp {
     pub selection: Selection,
     pub lib_selected: Option<Id>,
     pub left_tab: LeftTab,
+    pub video_tab: VideoTab,
     pub playhead: f64,
     pub playing: bool,
     play_anchor: (Instant, f64),
+    /// Play was pressed; waiting for the first frame before starting the clock.
+    starting: Option<Instant>,
+    first_frame: bool,
 
     pub assets: HashMap<Id, Assets>,
     jobs_tx: Sender<Job>,
@@ -142,25 +199,34 @@ pub struct KlipApp {
     dialog_tx: Sender<DialogResult>,
     dialog_rx: Receiver<DialogResult>,
 
-    grabber: Grabber,
-    requested: Option<(Id, i64)>,
+    /// Layer 0: clip under the playhead. Layer 1: incoming clip during a transition.
+    pub layers: [Layer; 2],
     decoder: Option<StreamDecoder>,
     next_decoder: Option<StreamDecoder>,
-    voice: Option<String>,
+    /// Audio voices of main-track clips currently playing.
+    voices: Vec<String>,
     audio: AudioPreview,
-    pub preview_tex: Option<TextureHandle>,
-    pub preview_blur: Option<TextureHandle>,
-    /// Which media the preview texture currently shows (None = nothing).
-    pub preview_media: Option<Id>,
 
     pub tl: TimelineView,
     /// Preview fills the whole screen (F / Esc).
     pub fullscreen: bool,
+    /// Player view zoom (1 = canvas fits the stage) and pan, in screen px.
+    pub view_zoom: f32,
+    pub view_pan: egui::Vec2,
     pub export: ExportUi,
     pub toasts: Vec<Toast>,
     pub text_font: Option<PathBuf>,
     pub ctx: egui::Context,
     pub dev: crate::dev::Dev,
+    // ---- safety net
+    autosaved: Option<Project>,
+    autosave_due: f64,
+    /// A previous session found on startup: (project, its file path).
+    pub restore_offer: Option<(Project, Option<PathBuf>)>,
+    /// "Save changes?" prompt is open because the window was asked to close.
+    pub close_prompt: bool,
+    allow_close: bool,
+    close_after_save: bool,
     last_title: String,
 }
 
@@ -197,26 +263,27 @@ impl KlipApp {
             selection: Selection::None,
             lib_selected: None,
             left_tab: LeftTab::Media,
+            video_tab: VideoTab::Basic,
             playhead: 0.0,
             playing: false,
             play_anchor: (Instant::now(), 0.0),
+            starting: None,
+            first_frame: false,
             assets: HashMap::new(),
             jobs_tx,
             jobs_rx,
             importing: 0,
             dialog_tx,
             dialog_rx,
-            grabber: Grabber::new(ctx.clone()),
-            requested: None,
+            layers: [Layer::new(ctx.clone()), Layer::new(ctx.clone())],
             decoder: None,
             next_decoder: None,
-            voice: None,
+            voices: vec![],
             audio: AudioPreview::default(),
-            preview_tex: None,
-            preview_blur: None,
-            preview_media: None,
             fullscreen: false,
-            tl: TimelineView { pps: 60.0, scroll: 0.0, drag: TlDrag::None, snap_line: None },
+            view_zoom: 1.0,
+            view_pan: egui::Vec2::ZERO,
+            tl: TimelineView { pps: 60.0, min_pps: 4.0, scroll: 0.0, drag: TlDrag::None, snap_line: None },
             export: ExportUi {
                 open: false,
                 scale_1080: true,
@@ -228,6 +295,12 @@ impl KlipApp {
             text_font,
             ctx,
             dev: crate::dev::Dev::from_env(),
+            autosaved: None,
+            autosave_due: 0.0,
+            restore_offer: None,
+            close_prompt: false,
+            allow_close: false,
+            close_after_save: false,
             last_title: String::new(),
         };
         // `klip file.mp4 project.klip …` on the command line.
@@ -235,9 +308,17 @@ impl KlipApp {
         if let Some(p) = args.iter().find(|p| p.extension().is_some_and(|e| e == "klip")) {
             app.open_project(p);
         }
+        let opened_something = !args.is_empty();
         let media: Vec<PathBuf> = args.into_iter().filter(|p| p.extension().is_none_or(|e| e != "klip")).collect();
         if !media.is_empty() {
             app.import(media);
+        }
+        if !opened_something && (!app.dev.active() || std::env::var_os("KLIP_DEMO_PROMPTS").is_some()) {
+            if let Ok((p, path)) = load_project_file(&autosave_path()) {
+                if !p.video.is_empty() || !p.media.is_empty() {
+                    app.restore_offer = Some((p, path));
+                }
+            }
         }
         app
     }
@@ -380,10 +461,11 @@ impl KlipApp {
                     let _ = tx.send(Job::Thumb(info.id, f));
                     ctx.request_repaint();
                 }
-                let count = ((info.duration / 1.5).ceil() as usize).clamp(4, 40);
-                let strip = media::filmstrip(&info, count, 96);
-                let _ = tx.send(Job::Strip(info.id, strip));
-                ctx.request_repaint();
+                let count = ((info.duration / 1.5).ceil() as usize).clamp(4, 64);
+                media::filmstrip(&info, count, 96, |batch| {
+                    let _ = tx.send(Job::Strip(info.id, batch));
+                    ctx.request_repaint();
+                });
             }
             if info.has_audio {
                 let w = media::waveform(&info.path);
@@ -441,17 +523,20 @@ impl KlipApp {
                 }
                 Job::Thumb(id, f) => {
                     let tex = self.ctx.load_texture(format!("thumb{id}"), to_image(&f), TextureOptions::LINEAR);
-                    self.assets.entry(id).or_default().thumb = Some(tex);
+                    let a = self.assets.entry(id).or_default();
+                    a.thumb = Some(tex);
+                    a.thumb_raw = Some(f);
+                    a.filtered.clear();
                 }
                 Job::Strip(id, frames) => {
-                    let strip = frames
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (t, f))| {
-                            (t, self.ctx.load_texture(format!("strip{id}_{i}"), to_image(&f), TextureOptions::LINEAR))
-                        })
-                        .collect();
-                    self.assets.entry(id).or_default().strip = strip;
+                    // Batches arrive coarse-to-fine; merge and keep sorted by time.
+                    let a = self.assets.entry(id).or_default();
+                    let base = a.strip.len();
+                    for (i, (t, f)) in frames.into_iter().enumerate() {
+                        let tex = self.ctx.load_texture(format!("strip{id}_{}", base + i), to_image(&f), TextureOptions::LINEAR);
+                        a.strip.push((t, tex));
+                    }
+                    a.strip.sort_by(|x, y| x.0.total_cmp(&y.0));
                 }
                 Job::Wave(id, w) => {
                     self.assets.entry(id).or_default().wave = Some(Arc::new(w));
@@ -493,39 +578,60 @@ impl KlipApp {
                 self.saved = self.project.clone();
                 self.project_path = Some(path);
                 self.toast(ToastKind::Success, "Project saved");
+                let _ = std::fs::remove_file(autosave_path());
+                self.autosaved = None;
+                if self.close_after_save {
+                    self.allow_close = true;
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
             Err(e) => self.toast(ToastKind::Error, format!("Save failed: {e}")),
         }
     }
 
     pub fn open_project(&mut self, path: &Path) {
-        let loaded = std::fs::read_to_string(path)
-            .map_err(|e| e.to_string())
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string()))
-            .and_then(|v| serde_json::from_value::<Project>(v["project"].clone()).map_err(|e| e.to_string()));
-        match loaded {
+        match load_project_file(path).map(|(p, _)| p) {
             Ok(p) => {
-                self.stop();
-                let missing = p.media.iter().filter(|m| !m.path.exists()).count();
-                self.project = p.clone();
-                self.committed = p.clone();
-                self.saved = p;
-                self.undo.clear();
-                self.redo.clear();
-                self.assets.clear();
-                self.selection = Selection::None;
-                self.playhead = 0.0;
-                self.project_path = Some(path.to_path_buf());
-                self.export.out = default_export_dir().join(format!("{}.mp4", safe_file_name(&self.project.name)));
-                for m in self.project.media.clone() {
-                    self.generate_assets(&m);
-                }
-                self.invalidate_preview();
-                if missing > 0 {
-                    self.toast(ToastKind::Error, format!("{missing} media file(s) are missing"));
-                }
+                self.adopt_project(p, Some(path.to_path_buf()));
             }
             Err(e) => self.toast(ToastKind::Error, format!("Could not open project: {e}")),
+        }
+    }
+
+    /// Accept a restored session from the autosave.
+    pub fn restore_session(&mut self) {
+        if let Some((p, path)) = self.restore_offer.take() {
+            self.adopt_project(p, path);
+            // Restored work is unsaved by definition.
+            self.saved = Project::default();
+            self.toast(ToastKind::Success, "Previous session restored");
+        }
+    }
+
+    pub fn discard_session(&mut self) {
+        self.restore_offer = None;
+        let _ = std::fs::remove_file(autosave_path());
+    }
+
+    fn adopt_project(&mut self, p: Project, path: Option<PathBuf>) {
+        self.stop();
+        let missing = p.media.iter().filter(|m| !m.path.exists()).count();
+        self.project = p.clone();
+        self.committed = p.clone();
+        self.saved = p;
+        self.undo.clear();
+        self.redo.clear();
+        self.assets.clear();
+        self.selection = Selection::None;
+        self.playhead = 0.0;
+        self.project_path = path;
+        self.export.out = default_export_dir().join(format!("{}.mp4", safe_file_name(&self.project.name)));
+        for m in self.project.media.clone() {
+            self.generate_assets(&m);
+        }
+        self.invalidate_preview();
+        if missing > 0 {
+            self.toast(ToastKind::Error, format!("{missing} media file(s) are missing"));
         }
     }
 
@@ -533,10 +639,52 @@ impl KlipApp {
         self.project != self.saved
     }
 
+    /// Write unsaved work to the autosave file every few seconds.
+    fn autosave(&mut self, ctx: &egui::Context) {
+        if self.dev.active() || !self.is_dirty() || self.restore_offer.is_some() {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        if now < self.autosave_due || self.autosaved.as_ref() == Some(&self.project) {
+            return;
+        }
+        self.autosave_due = now + 15.0;
+        let path = autosave_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let json = serde_json::json!({ "app": "klip", "version": 1, "project": self.project, "path": self.project_path });
+        if std::fs::write(&path, serde_json::to_string(&json).unwrap_or_default()).is_ok() {
+            self.autosaved = Some(self.project.clone());
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(16));
+    }
+
+    /// Intercept window close while there are unsaved changes.
+    fn handle_close(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.is_dirty() && !self.dev.active() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_prompt = true;
+        }
+    }
+
+    pub fn close_discard(&mut self) {
+        let _ = std::fs::remove_file(autosave_path());
+        self.allow_close = true;
+        self.close_prompt = false;
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    pub fn close_save(&mut self) {
+        self.close_prompt = false;
+        self.close_after_save = true;
+        self.save();
+    }
+
     // ---------------------------------------------------------------- history
 
     fn commit_history(&mut self, ctx: &egui::Context) {
-        let busy = ctx.input(|i| i.pointer.any_down()) || ctx.memory(|m| m.focused().is_some());
+        let busy = ctx.input(|i| i.pointer.any_down()) || ctx.text_edit_focused();
         if !busy {
             self.commit_now();
         }
@@ -597,7 +745,7 @@ impl KlipApp {
         let id = self.project.new_id();
         let dur = if m.kind == MediaKind::Image { 3.0 } else { m.duration };
         let fit = if (m.aspect() - aspect_of(self.project.aspect)).abs() < 0.08 { FitMode::Fill } else { FitMode::Blur };
-        let clip = VideoClip { id, media: media_id, src_in: 0.0, src_out: dur, fit, volume: 1.0 };
+        let clip = VideoClip::new(id, media_id, 0.0, dur, fit);
         let idx = index.unwrap_or(self.project.video.len()).min(self.project.video.len());
         self.project.video.insert(idx, clip);
         self.selection = Selection::Video(id);
@@ -623,6 +771,69 @@ impl KlipApp {
         self.project.texts.push(t);
     }
 
+    /// Main-track clip that clip-level actions (filters, …) apply to:
+    /// the selected clip, else the clip under the playhead.
+    pub fn target_clip(&self) -> Option<usize> {
+        if let Selection::Video(id) = self.selection {
+            return self.project.video_index(id);
+        }
+        self.project.video_at(self.playhead).map(|(i, _)| i)
+    }
+
+    /// Cut that a transition applies to (index of the outgoing clip):
+    /// the selected transition, the cut after the selected clip, or the
+    /// cut nearest the playhead.
+    pub fn target_cut(&self) -> Option<usize> {
+        let n = self.project.video.len();
+        if n < 2 {
+            return None;
+        }
+        match self.selection {
+            Selection::Transition(id) | Selection::Video(id) => {
+                if let Some(i) = self.project.video_index(id) {
+                    return Some(i.min(n - 2));
+                }
+            }
+            _ => {}
+        }
+        let starts = self.project.video_starts();
+        (0..n - 1).min_by(|&a, &b| {
+            let da = (starts[a + 1] - self.playhead).abs();
+            let db = (starts[b + 1] - self.playhead).abs();
+            da.total_cmp(&db)
+        })
+    }
+
+    pub fn apply_transition(&mut self, kind: crate::fx::TransitionKind) {
+        let Some(i) = self.target_cut() else {
+            self.toast(ToastKind::Info, "Add at least two clips to use transitions");
+            return;
+        };
+        let dur = self.project.video[i].transition.map_or(0.5, |t| t.dur);
+        self.project.video[i].transition = Some(crate::fx::Transition { kind, dur });
+        self.selection = Selection::Transition(self.project.video[i].id);
+        let s = self.project.video_starts();
+        self.seek((s[i + 1] - 0.2).max(0.0));
+        self.invalidate_preview();
+    }
+
+    pub fn apply_transition_all(&mut self, kind: crate::fx::TransitionKind, dur: f64) {
+        let n = self.project.video.len();
+        for c in self.project.video.iter_mut().take(n.saturating_sub(1)) {
+            c.transition = Some(crate::fx::Transition { kind, dur });
+        }
+        self.invalidate_preview();
+    }
+
+    pub fn apply_filter(&mut self, preset: crate::fx::FilterPreset) {
+        let Some(i) = self.target_clip() else {
+            self.toast(ToastKind::Info, "Add a clip to use filters");
+            return;
+        };
+        self.project.video[i].filter = preset;
+        self.selection = Selection::Video(self.project.video[i].id);
+    }
+
     pub fn delete_selection(&mut self) {
         match self.selection {
             Selection::Video(id) => {
@@ -631,6 +842,12 @@ impl KlipApp {
             }
             Selection::Text(id) => self.project.texts.retain(|c| c.id != id),
             Selection::Audio(id) => self.project.audio.retain(|c| c.id != id),
+            Selection::Transition(id) => {
+                if let Some(c) = self.project.video.iter_mut().find(|c| c.id == id) {
+                    c.transition = None;
+                }
+                self.invalidate_preview();
+            }
             Selection::None => return,
         }
         self.selection = Selection::None;
@@ -663,7 +880,7 @@ impl KlipApp {
                     self.project.audio.push(c);
                 }
             }
-            Selection::None => {}
+            Selection::None | Selection::Transition(_) => {}
         }
         self.invalidate_preview();
     }
@@ -690,6 +907,10 @@ impl KlipApp {
             Selection::Video(id) => self.project.video.iter().any(|c| c.id == id),
             Selection::Text(id) => self.project.texts.iter().any(|c| c.id == id),
             Selection::Audio(id) => self.project.audio.iter().any(|c| c.id == id),
+            Selection::Transition(id) => self
+                .project
+                .video_index(id)
+                .is_some_and(|i| i + 1 < self.project.video.len() && self.project.video[i].transition.is_some()),
         };
         if !ok {
             self.selection = Selection::None;
@@ -699,6 +920,9 @@ impl KlipApp {
     // --------------------------------------------------------------- playback
 
     pub fn toggle_play(&mut self) {
+        if std::env::var_os("KLIP_DEBUG_PLAYBACK").is_some() {
+            eprintln!("[play] toggle_play (playing={}, playhead={:.2}, clips={})", self.playing, self.playhead, self.project.video.len());
+        }
         if self.playing {
             self.stop();
         } else {
@@ -709,17 +933,32 @@ impl KlipApp {
                 self.playhead = 0.0;
             }
             self.playing = true;
-            self.play_anchor = (Instant::now(), self.playhead);
+            self.begin_preroll();
         }
     }
 
+    /// Hold the clock until decoders have produced the first frame, so video
+    /// and audio (which start decoding at the same moment) begin together.
+    fn begin_preroll(&mut self) {
+        self.starting = Some(Instant::now());
+        self.first_frame = false;
+        self.play_anchor = (Instant::now(), self.playhead);
+    }
+
+    #[track_caller]
     pub fn stop(&mut self) {
+        if std::env::var_os("KLIP_DEBUG_PLAYBACK").is_some() {
+            eprintln!("[play] stop() from {} (playing={}, starting={})", std::panic::Location::caller(), self.playing, self.starting.is_some());
+        }
         self.playing = false;
+        self.starting = None;
         self.decoder = None;
         self.next_decoder = None;
         self.audio.stop_all();
-        self.voice = None;
-        self.requested = None;
+        self.voices.clear();
+        for l in &mut self.layers {
+            l.requested = None;
+        }
     }
 
     pub fn seek(&mut self, t: f64) {
@@ -732,8 +971,8 @@ impl KlipApp {
             self.decoder = None;
             self.next_decoder = None;
             self.audio.stop_all();
-            self.voice = None;
-            self.play_anchor = (Instant::now(), t);
+            self.voices.clear();
+            self.begin_preroll();
         }
     }
 
@@ -743,33 +982,119 @@ impl KlipApp {
     }
 
     pub fn invalidate_preview(&mut self) {
-        self.requested = None;
+        for l in &mut self.layers {
+            l.requested = None;
+        }
         if self.playing {
             self.decoder = None;
             self.next_decoder = None;
             self.audio.stop_all();
-            self.voice = None;
-            self.play_anchor = (Instant::now(), self.playhead);
+            self.voices.clear();
+            self.begin_preroll();
         }
     }
 
-    fn show_frame(&mut self, media_id: Id, f: &Frame) {
-        let img = to_image(f);
-        match &mut self.preview_tex {
-            Some(t) => t.set(img, TextureOptions::LINEAR),
-            None => self.preview_tex = Some(self.ctx.load_texture("preview", img, TextureOptions::LINEAR)),
+    /// Upload a decoded frame into a preview layer, applying the clip's grade.
+    fn show_frame(&mut self, slot: usize, clip_id: Id, media_id: Id, f: Frame) {
+        let grade = self
+            .project
+            .video
+            .iter()
+            .find(|c| c.id == clip_id)
+            .map(|c| c.grade())
+            .unwrap_or_default();
+        if slot == 0 {
+            self.first_frame = true;
+            if std::env::var_os("KLIP_DEBUG_PLAYBACK").is_some() && self.playing {
+                let now = self.ctx.input(|i| i.time);
+                let (n, since) = self.ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(egui::Id::new("fps_dbg"), || (0u32, now)));
+                if now - since >= 1.0 {
+                    eprintln!("[play] {n} frames/s shown, playhead {:.2}", self.playhead);
+                    self.ctx.data_mut(|d| d.insert_temp(egui::Id::new("fps_dbg"), (1u32, now)));
+                } else {
+                    self.ctx.data_mut(|d| d.insert_temp(egui::Id::new("fps_dbg"), (n + 1, since)));
+                }
+            }
         }
-        let tiny = to_image(&media::tiny_blur(f, 40));
-        match &mut self.preview_blur {
-            Some(t) => t.set(tiny, TextureOptions::LINEAR),
-            None => self.preview_blur = Some(self.ctx.load_texture("preview_blur", tiny, TextureOptions::LINEAR)),
+        let l = &mut self.layers[slot];
+        l.raw = Some(f);
+        l.media = Some(media_id);
+        l.clip = Some(clip_id);
+        l.upload(&self.ctx, grade);
+    }
+
+    /// Keep layer `slot` showing main-track clip `idx` at the playhead.
+    fn feed_layer(&mut self, slot: usize, idx: usize, clip_start: f64) {
+        let t = self.playhead;
+        let clip = self.project.video[idx].clone();
+        let Some(m) = self.project.media(clip.media).cloned() else { return };
+        let local = (t - clip_start).clamp(0.0, clip.dur());
+        let (w, h) = media::fit_size(&m, 1280, 1280);
+        self.layers[slot].clip = Some(clip.id);
+
+        if self.playing && m.kind == MediaKind::Video {
+            // Layer 0 uses `decoder` (adopting the pre-rolled one at a cut);
+            // layer 1 reads from the pre-rolled `next_decoder`.
+            if slot == 0 && self.decoder.as_ref().is_none_or(|d| d.clip_id != clip.id) {
+                self.decoder = match self.next_decoder.take() {
+                    Some(d) if d.clip_id == clip.id => Some(d),
+                    other => {
+                        self.next_decoder = other;
+                        StreamDecoder::new(self.ctx.clone(), clip.id, &m.path, clip.src_in + local, clip.dur() - local, t, w, h)
+                    }
+                };
+            }
+            if slot == 1 && self.next_decoder.as_ref().is_none_or(|d| d.clip_id != clip.id) {
+                self.next_decoder =
+                    StreamDecoder::new(self.ctx.clone(), clip.id, &m.path, clip.src_in + local, clip.dur() - local, t, w, h);
+            }
+            let dec = if slot == 0 { self.decoder.as_mut() } else { self.next_decoder.as_mut() };
+            if let Some(f) = dec.and_then(|d| d.frame_for(t)) {
+                self.show_frame(slot, clip.id, m.id, f);
+            }
+        } else {
+            let src_t = if m.kind == MediaKind::Image { 0.0 } else { clip.src_in + local };
+            let key = (m.id, (src_t * FPS).round() as i64);
+            let l = &mut self.layers[slot];
+            if l.requested != Some(key) {
+                l.requested = Some(key);
+                l.grabber.request(GrabRequest { key, path: m.path.clone(), t: src_t, w, h });
+            }
         }
-        self.preview_media = Some(media_id);
+        // Frames arriving from the scrub grabber.
+        while let Ok((key, f)) = self.layers[slot].grabber.rx.try_recv() {
+            if Some(key) == self.layers[slot].requested {
+                self.show_frame(slot, clip.id, key.0, f);
+            }
+        }
+        // Re-grade instantly when filter/adjust values change.
+        let grade = clip.grade();
+        if self.layers[slot].graded != Some(grade) {
+            let ctx = self.ctx.clone();
+            self.layers[slot].upload(&ctx, grade);
+        }
     }
 
     fn update_playback(&mut self) {
         let total = self.project.duration();
-        if self.playing {
+        if let (true, Some(since)) = (self.playing, self.starting) {
+            // Pre-roll: keep the playhead still until the first frame is in
+            // (photos are instant), or give up waiting after a moment.
+            let still_media = self
+                .project
+                .video_at(self.playhead)
+                .and_then(|(i, _)| self.project.media(self.project.video[i].media))
+                .is_some_and(|m| m.kind != MediaKind::Video);
+            if self.first_frame || still_media || since.elapsed().as_secs_f64() > 2.0 {
+                if std::env::var_os("KLIP_DEBUG_PLAYBACK").is_some() {
+                    eprintln!("[play] clock started after {:.0} ms pre-roll (first frame: {})", since.elapsed().as_secs_f64() * 1000.0, self.first_frame);
+                }
+                self.starting = None;
+                self.play_anchor = (Instant::now(), self.playhead);
+            }
+            self.ctx.request_repaint();
+        } else if self.playing {
+            self.audio.reap();
             let t = self.play_anchor.1 + self.play_anchor.0.elapsed().as_secs_f64();
             if t >= total {
                 self.playhead = total;
@@ -782,75 +1107,64 @@ impl KlipApp {
 
         let t = self.playhead;
         let Some((i, start)) = self.project.video_at(t) else {
-            self.preview_media = None;
+            for l in &mut self.layers {
+                l.clip = None;
+                l.media = None;
+            }
             self.decoder = None;
             return;
         };
-        let clip = self.project.video[i].clone();
-        let Some(m) = self.project.media(clip.media).cloned() else { return };
-        let local = (t - start).clamp(0.0, clip.dur());
-        let (w, h) = media::fit_size(&m, 1280, 1280);
+        let starts = self.project.video_starts();
+        self.feed_layer(0, i, start);
 
-        if self.playing && m.kind == MediaKind::Video {
-            if self.decoder.as_ref().is_none_or(|d| d.clip_id != clip.id) {
-                self.decoder = match self.next_decoder.take() {
-                    Some(d) if d.clip_id == clip.id => Some(d),
-                    _ => StreamDecoder::new(
-                        self.ctx.clone(),
-                        clip.id,
-                        &m.path,
-                        clip.src_in + local,
-                        clip.dur() - local,
-                        t,
-                        w,
-                        h,
-                    ),
-                };
-            }
-            if let Some(f) = self.decoder.as_mut().and_then(|d| d.frame_for(t)) {
-                self.show_frame(m.id, &f);
-            }
-            // Pre-roll the next clip so cuts are seamless.
-            let end = start + clip.dur();
-            if end - t < 1.0 && self.next_decoder.is_none() {
-                if let Some(next) = self.project.video.get(i + 1).cloned() {
+        // Incoming clip during a transition.
+        let in_transition = self.project.transition_at(t).is_some_and(|(j, _)| j == i);
+        if in_transition {
+            self.feed_layer(1, i + 1, starts[i + 1]);
+        } else {
+            self.layers[1].clip = None;
+        }
+
+        // Pre-roll the next clip so cuts and transitions start instantly.
+        if self.playing && !in_transition && self.next_decoder.is_none() {
+            if let (Some(next), Some(&ns)) = (self.project.video.get(i + 1).cloned(), starts.get(i + 1)) {
+                if ns - t < 1.0 {
                     if let Some(nm) = self.project.media(next.media).cloned() {
                         if nm.kind == MediaKind::Video {
                             let (nw, nh) = media::fit_size(&nm, 1280, 1280);
-                            self.next_decoder = StreamDecoder::new(
-                                self.ctx.clone(), next.id, &nm.path, next.src_in, next.dur(), end, nw, nh,
-                            );
+                            self.next_decoder =
+                                StreamDecoder::new(self.ctx.clone(), next.id, &nm.path, next.src_in, next.dur(), ns, nw, nh);
                         }
                     }
                 }
-            }
-        } else {
-            self.decoder = None;
-            let src_t = if m.kind == MediaKind::Image { 0.0 } else { clip.src_in + local };
-            let key = (m.id, (src_t * FPS).round() as i64);
-            let shown = self.preview_media == Some(m.id) && self.requested == Some(key);
-            if !shown && self.requested != Some(key) {
-                self.requested = Some(key);
-                self.grabber.request(GrabRequest { key, path: m.path.clone(), t: src_t, w, h });
-            }
-        }
-        while let Ok((key, f)) = self.grabber.rx.try_recv() {
-            if Some(key) == self.requested || self.preview_media.is_none() {
-                self.show_frame(key.0, &f);
             }
         }
 
         // ---- audio preview
         if self.playing {
-            let key = format!("v{}", clip.id);
-            if self.voice.as_deref() != Some(&key) {
-                if let Some(old) = self.voice.take() {
+            let mut want: Vec<(usize, f64)> = vec![(i, start)];
+            if in_transition {
+                want.push((i + 1, starts[i + 1]));
+            }
+            let keys: Vec<String> = want.iter().map(|(k, _)| format!("v{}", self.project.video[*k].id)).collect();
+            for old in self.voices.clone() {
+                if !keys.contains(&old) {
                     self.audio.stop(&old);
+                    self.voices.retain(|v| v != &old);
                 }
-                if m.has_audio {
-                    self.audio.play(key.clone(), &m.path, clip.src_in + local, clip.dur() - local, clip.volume);
+            }
+            for ((k, s), key) in want.into_iter().zip(keys) {
+                if self.voices.contains(&key) {
+                    continue;
                 }
-                self.voice = Some(key);
+                let c = self.project.video[k].clone();
+                if let Some(m) = self.project.media(c.media).cloned() {
+                    if m.has_audio {
+                        let local = (t - s).clamp(0.0, c.dur());
+                        self.audio.play(key.clone(), &m.path, c.src_in + local, c.dur() - local, c.volume);
+                    }
+                }
+                self.voices.push(key);
             }
             for a in self.project.audio.clone() {
                 let k = format!("a{}", a.id);
@@ -870,7 +1184,9 @@ impl KlipApp {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
-        let typing = ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input();
+        // Only a focused *text field* should swallow shortcuts. (egui also
+        // focuses buttons/clips on click, which used to block Space.)
+        let typing = ctx.text_edit_focused();
         let mut act: Vec<&str> = vec![];
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y) {
@@ -955,8 +1271,8 @@ impl KlipApp {
                 "fwd1s" => self.seek(self.playhead + 1.0),
                 "home" => self.seek(0.0),
                 "end" => self.seek(self.project.duration()),
-                "zoomin" => self.tl.pps = (self.tl.pps * 1.25).min(800.0),
-                "zoomout" => self.tl.pps = (self.tl.pps / 1.25).max(4.0),
+                "zoomin" => self.tl.pps = (self.tl.pps * 1.25).min(crate::ui::MAX_PPS),
+                "zoomout" => self.tl.pps = (self.tl.pps / 1.25).max(self.tl.min_pps),
                 "deselect" => {
                     if self.fullscreen {
                         self.set_fullscreen(false);
@@ -1000,6 +1316,8 @@ impl eframe::App for KlipApp {
             self.last_title = title;
         }
         crate::dev::tick(self, &ctx);
+        self.autosave(&ctx);
+        self.handle_close(&ctx);
         if self.importing > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -1007,12 +1325,33 @@ impl eframe::App for KlipApp {
 
     fn on_exit(&mut self) {
         self.stop();
+        if !self.is_dirty() {
+            let _ = std::fs::remove_file(autosave_path());
+        }
         if let Some(j) = &self.export.job {
             if j.state().1 == crate::export::ExportStatus::Running {
                 j.cancel();
             }
         }
     }
+}
+
+/// `~/.local/share/klip/autosave.klip` (or `$XDG_DATA_HOME/klip/…`).
+pub fn autosave_path() -> PathBuf {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("klip").join("autosave.klip")
+}
+
+/// Read a `.klip` file: (project, the path it was saved from, if recorded).
+pub fn load_project_file(path: &Path) -> Result<(Project, Option<PathBuf>), String> {
+    let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| e.to_string())?;
+    let p: Project = serde_json::from_value(v["project"].clone()).map_err(|e| e.to_string())?;
+    let origin = v["path"].as_str().map(PathBuf::from);
+    Ok((p, origin))
 }
 
 pub fn to_image(f: &Frame) -> ColorImage {

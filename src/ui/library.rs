@@ -1,6 +1,7 @@
 //! Left panel: media library, audio, text presets, captions.
 
-use crate::app::{KlipApp, LeftTab, MediaDrag, caption_template};
+use crate::app::{KlipApp, LeftTab, MediaDrag, caption_template, to_image};
+use crate::fx::{FilterPreset, TransitionKind};
 use crate::model::{MediaKind, TextClip, TextStyle, timecode};
 use crate::theme::*;
 use egui::{Align2, Color32, CornerRadius, FontId, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
@@ -16,6 +17,8 @@ pub fn library(app: &mut KlipApp, ui: &mut egui::Ui) {
         LeftTab::Audio => audio_tab(app, ui),
         LeftTab::Text => text_tab(app, ui),
         LeftTab::Captions => captions_tab(app, ui),
+        LeftTab::Transitions => transitions_tab(app, ui),
+        LeftTab::Filters => filters_tab(app, ui),
     });
 }
 
@@ -25,13 +28,15 @@ fn tabs(app: &mut KlipApp, ui: &mut egui::Ui) {
         (LeftTab::Audio, ph::MUSIC_NOTES, "Audio"),
         (LeftTab::Text, ph::TEXT_T, "Text"),
         (LeftTab::Captions, ph::SUBTITLES, "Captions"),
+        (LeftTab::Transitions, ph::ARROWS_LEFT_RIGHT, "Transitions"),
+        (LeftTab::Filters, ph::SWATCHES, "Filters"),
     ];
     let full = ui.available_rect_before_wrap();
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), 58.0));
     ui.allocate_rect(bar, Sense::hover());
-    let w = (bar.width() - 16.0) / tabs.len() as f32;
+    let w = (bar.width() - 12.0) / tabs.len() as f32;
     for (i, (tab, icon, label)) in tabs.iter().enumerate() {
-        let r = Rect::from_min_size(Pos2::new(bar.left() + 8.0 + w * i as f32, bar.top() + 6.0), Vec2::new(w, 48.0));
+        let r = Rect::from_min_size(Pos2::new(bar.left() + 6.0 + w * i as f32, bar.top() + 6.0), Vec2::new(w, 48.0));
         let resp = ui.interact(r, ui.id().with(("tab", i)), Sense::click());
         let sel = app.left_tab == *tab;
         let h = anim(ui, ("tab_h", i), resp.hovered());
@@ -43,7 +48,7 @@ fn tabs(app: &mut KlipApp, ui: &mut egui::Ui) {
             p.rect_filled(r.shrink(3.0), CornerRadius::same(R_SM + 1), bg);
         }
         p.text(r.center() - Vec2::new(0.0, 8.0), Align2::CENTER_CENTER, *icon, FontId::proportional(19.0), mix(col, ACCENT, t));
-        p.text(r.center() + Vec2::new(0.0, 13.0), Align2::CENTER_CENTER, *label, FontId::proportional(12.0), col);
+        p.text(r.center() + Vec2::new(0.0, 13.0), Align2::CENTER_CENTER, *label, FontId::proportional(11.0), col);
         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             app.left_tab = *tab;
         }
@@ -391,8 +396,11 @@ fn captions_tab(app: &mut KlipApp, ui: &mut egui::Ui) {
     let before = tmpl.clone();
     let opts: Vec<_> = TextStyle::ALL.iter().map(|s| (*s, s.label())).collect();
     segmented(ui, &mut tmpl.style, &opts);
-    ui.add(egui::Slider::new(&mut tmpl.size, 24.0..=160.0).text("Size"));
-    ui.add(egui::Slider::new(&mut tmpl.y, 0.05..=0.95).text("Position").show_value(false));
+    slider_row(ui, "Size", &mut tmpl.size, 24.0..=160.0, 66.0, num("", 0, 1.0));
+    let mut y = tmpl.y * 100.0;
+    if slider_row(ui, "Position", &mut y, 5.0..=95.0, 72.0, num("%", 0, 1.0)) {
+        tmpl.y = y / 100.0;
+    }
     super::inspector::color_swatches(ui, &mut tmpl.color);
     if tmpl != before {
         for t in app.project.texts.iter_mut().filter(|t| t.is_caption) {
@@ -428,5 +436,214 @@ pub fn elide(s: &str, width: f32, char_w: f32) -> String {
         let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
         t.push('…');
         t
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transitions
+// ---------------------------------------------------------------------------
+
+const DEMO_A: Color32 = Color32::from_rgb(0x4f, 0x74, 0xb8);
+const DEMO_B: Color32 = Color32::from_rgb(0xd9, 0x8a, 0x5b);
+
+/// Mini animation of a transition from frame A to frame B at progress `q`.
+fn paint_transition_demo(p: &egui::Painter, r: Rect, kind: TransitionKind, q: f32) {
+    let p = p.with_clip_rect(r);
+    let frame = |p: &egui::Painter, rr: Rect, col: Color32, label: &str, alpha: f32| {
+        p.rect_filled(rr, CornerRadius::ZERO, col.gamma_multiply(alpha));
+        p.text(rr.center(), Align2::CENTER_CENTER, label, FontId::new(15.0, semibold_family()), Color32::from_white_alpha((200.0 * alpha) as u8));
+    };
+    let (w, h) = (r.width(), r.height());
+    let ease = |x: f32| x * x * (3.0 - 2.0 * x);
+    match kind {
+        TransitionKind::Mix => {
+            frame(&p, r, DEMO_A, "A", 1.0);
+            frame(&p, r, DEMO_B, "B", q);
+        }
+        TransitionKind::FadeBlack | TransitionKind::FadeWhite => {
+            let c = if kind == TransitionKind::FadeBlack { 0 } else { 255 };
+            let (col, l, k) = if q < 0.5 { (DEMO_A, "A", q * 2.0) } else { (DEMO_B, "B", 2.0 - q * 2.0) };
+            frame(&p, r, col, l, 1.0);
+            p.rect_filled(r, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(c, c, c, (ease(k) * 255.0) as u8));
+        }
+        TransitionKind::SlideLeft => {
+            frame(&p, r.translate(Vec2::new(-q * w, 0.0)), DEMO_A, "A", 1.0);
+            frame(&p, r.translate(Vec2::new((1.0 - q) * w, 0.0)), DEMO_B, "B", 1.0);
+        }
+        TransitionKind::SlideRight => {
+            frame(&p, r.translate(Vec2::new(q * w, 0.0)), DEMO_A, "A", 1.0);
+            frame(&p, r.translate(Vec2::new(-(1.0 - q) * w, 0.0)), DEMO_B, "B", 1.0);
+        }
+        TransitionKind::SlideUp => {
+            frame(&p, r.translate(Vec2::new(0.0, -q * h)), DEMO_A, "A", 1.0);
+            frame(&p, r.translate(Vec2::new(0.0, (1.0 - q) * h)), DEMO_B, "B", 1.0);
+        }
+        TransitionKind::Wipe => {
+            frame(&p, r, DEMO_A, "A", 1.0);
+            let wr = Rect::from_min_max(Pos2::new(r.right() - q * w, r.top()), r.max);
+            frame(&p.with_clip_rect(wr), r, DEMO_B, "B", 1.0);
+        }
+        TransitionKind::ZoomIn => {
+            frame(&p, r, DEMO_B, "B", 1.0);
+            let z = 1.0 + ease(q) * 0.6;
+            frame(&p, Rect::from_center_size(r.center(), r.size() * z), DEMO_A, "A", 1.0 - ease(q));
+        }
+        TransitionKind::Blur => {
+            frame(&p, r, DEMO_A, "A", 1.0);
+            frame(&p, r, DEMO_B, "B", q);
+            let haze = (std::f32::consts::PI * q).sin();
+            p.rect_filled(r, CornerRadius::ZERO, Color32::from_white_alpha((haze * 70.0) as u8));
+        }
+    }
+}
+
+/// Grid of transition tiles (animated on hover). Returns the clicked kind.
+pub fn transition_grid(ui: &mut egui::Ui, current: Option<TransitionKind>, cols: usize) -> Option<TransitionKind> {
+    let gap = 8.0;
+    let w = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+    let th = (w * 0.62).floor();
+    let mut clicked = None;
+    for row in TransitionKind::ALL.chunks(cols) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for kind in row {
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(w, th + 22.0), Sense::click());
+                let tile = Rect::from_min_size(r.min, Vec2::new(w, th));
+                let sel = current == Some(*kind);
+                let h = anim(ui, ("tr_h", kind.label()), resp.hovered());
+                let s = anim(ui, ("tr_s", kind.label()), sel);
+                let q = if resp.hovered() {
+                    ui.ctx().request_repaint();
+                    let t = (ui.input(|i| i.time) * 0.8) as f32 % 1.5;
+                    (t - 0.25).clamp(0.0, 1.0)
+                } else {
+                    0.45
+                };
+                paint_transition_demo(ui.painter(), tile, *kind, q);
+                round_mask(ui.painter(), tile, R_SM as f32, BG1);
+                let stroke = mix(mix(Color32::TRANSPARENT, BORDER_HI, h), ACCENT, s);
+                if stroke.a() > 0 {
+                    ui.painter().rect_stroke(tile, CornerRadius::same(R_SM), Stroke::new(1.0 + s, stroke), StrokeKind::Inside);
+                }
+                ui.painter().text(
+                    Pos2::new(tile.center().x, tile.bottom() + 11.0),
+                    Align2::CENTER_CENTER,
+                    kind.label(),
+                    FontId::proportional(11.5),
+                    mix(TEXT_DIM, TEXT, s.max(h)),
+                );
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    clicked = Some(*kind);
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
+    clicked
+}
+
+fn transitions_tab(app: &mut KlipApp, ui: &mut egui::Ui) {
+    header(ui, "Transitions", |_| {});
+    let Some(i) = app.target_cut() else {
+        ui.label(RichText::new("Add two or more clips to the timeline to use transitions.").size(12.5).color(TEXT_DIM));
+        return;
+    };
+    let name = |k: usize| {
+        app.project.video.get(k).and_then(|c| app.project.media(c.media)).map(|m| m.name.clone()).unwrap_or_default()
+    };
+    ui.label(
+        RichText::new(format!("Cut between {} and {}", elide(&name(i), 110.0, 7.0), elide(&name(i + 1), 110.0, 7.0)))
+            .size(12.0)
+            .color(TEXT_DIM),
+    );
+    ui.add_space(6.0);
+    let current = app.project.video[i].transition.map(|t| t.kind);
+    if let Some(k) = transition_grid(ui, current, 3) {
+        app.apply_transition(k);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filters
+// ---------------------------------------------------------------------------
+
+fn filters_tab(app: &mut KlipApp, ui: &mut egui::Ui) {
+    header(ui, "Filters", |_| {});
+    let Some(ci) = app.target_clip() else {
+        ui.label(RichText::new("Add a clip to the timeline to use filters.").size(12.5).color(TEXT_DIM));
+        return;
+    };
+    let clip = app.project.video[ci].clone();
+    let aspect = app.project.media(clip.media).map(|m| m.aspect()).unwrap_or(1.0);
+
+    // Build graded thumbnails for this clip's media once.
+    if let Some(a) = app.assets.get_mut(&clip.media) {
+        if let Some(raw) = a.thumb_raw.clone() {
+            for preset in FilterPreset::ALL {
+                a.filtered.entry(preset).or_insert_with(|| {
+                    let mut f = raw.clone();
+                    preset.look().apply(&mut f.rgba);
+                    ui.ctx().load_texture(format!("filter{}_{preset:?}", clip.media), to_image(&f), egui::TextureOptions::LINEAR)
+                });
+            }
+        }
+    }
+
+    let cols = 3;
+    let gap = 8.0;
+    let w = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+    let th = w.floor();
+    let mut picked = None;
+    for row in FilterPreset::ALL.chunks(cols) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for preset in row {
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(w, th + 22.0), Sense::click());
+                let tile = Rect::from_min_size(r.min, Vec2::new(w, th));
+                let sel = clip.filter == *preset;
+                let h = anim(ui, ("flt_h", preset.label()), resp.hovered());
+                let s = anim(ui, ("flt_s", preset.label()), sel);
+                let p = ui.painter();
+                p.rect_filled(tile, CornerRadius::same(R_SM), BG2);
+                if let Some(t) = app.assets.get(&clip.media).and_then(|a| a.filtered.get(preset)) {
+                    p.image(t.id(), tile, cover_uv(aspect, 1.0), Color32::WHITE);
+                    round_mask(p, tile, R_SM as f32, BG1);
+                }
+                let stroke = mix(mix(Color32::TRANSPARENT, BORDER_HI, h), ACCENT, s);
+                if stroke.a() > 0 {
+                    p.rect_stroke(tile, CornerRadius::same(R_SM), Stroke::new(1.0 + s, stroke), StrokeKind::Inside);
+                }
+                p.text(
+                    Pos2::new(tile.center().x, tile.bottom() + 11.0),
+                    Align2::CENTER_CENTER,
+                    preset.label(),
+                    FontId::proportional(11.5),
+                    mix(TEXT_DIM, TEXT, s.max(h)),
+                );
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    picked = Some(*preset);
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
+    if let Some(p) = picked {
+        app.apply_filter(p);
+    }
+    let c = &mut app.project.video[ci];
+    if c.filter != FilterPreset::None {
+        ui.add_space(6.0);
+        let mut amt = c.filter_amount * 100.0;
+        if slider_row(ui, "Strength", &mut amt, 0.0..=100.0, 100.0, num("%", 0, 1.0)) {
+            c.filter_amount = amt / 100.0;
+        }
+        ui.add_space(4.0);
+        if link_button(ui, "Apply to all clips").clicked() {
+            let (f, amt) = (c.filter, c.filter_amount);
+            for o in app.project.video.iter_mut() {
+                o.filter = f;
+                o.filter_amount = amt;
+            }
+        }
     }
 }

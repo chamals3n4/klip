@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 
+#[derive(Clone)]
 pub struct Frame {
     pub w: usize,
     pub h: usize,
@@ -144,20 +145,28 @@ pub fn grab_frame(path: &Path, t: f64, w: usize, h: usize) -> Option<Frame> {
     Some(Frame { w, h, rgba })
 }
 
-/// A handful of evenly spaced thumbnails for the timeline filmstrip.
-pub fn filmstrip(info: &MediaInfo, count: usize, thumb_h: u32) -> Vec<(f64, Frame)> {
+/// Evenly spaced thumbnails for the timeline filmstrip, delivered in
+/// batches coarse-to-fine (every 8th first) so long videos fill in quickly.
+pub fn filmstrip(info: &MediaInfo, count: usize, thumb_h: u32, mut emit: impl FnMut(Vec<(f64, Frame)>)) {
     let (w, h) = fit_size(info, thumb_h * 4, thumb_h);
     if info.kind == MediaKind::Image {
-        return grab_frame(&info.path, 0.0, w, h)
-            .map(|f| vec![(0.0, f)])
-            .unwrap_or_default();
+        if let Some(f) = grab_frame(&info.path, 0.0, w, h) {
+            emit(vec![(0.0, f)]);
+        }
+        return;
     }
-    (0..count)
-        .filter_map(|i| {
-            let t = info.duration * (i as f64 + 0.5) / count as f64;
-            grab_frame(&info.path, t, w, h).map(|f| (t, f))
-        })
-        .collect()
+    for phase in [0usize, 4, 2, 6, 1, 5, 3, 7] {
+        let batch: Vec<_> = (phase..count)
+            .step_by(8)
+            .filter_map(|i| {
+                let t = info.duration * (i as f64 + 0.5) / count as f64;
+                grab_frame(&info.path, t, w, h).map(|f| (t, f))
+            })
+            .collect();
+        if !batch.is_empty() {
+            emit(batch);
+        }
+    }
 }
 
 /// Peak amplitude per 1/`rate` second, normalised 0..1.

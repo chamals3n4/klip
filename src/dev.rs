@@ -7,6 +7,8 @@
 //! - `KLIP_DEMO_PLAY=1`        start playback once imports finish
 //! - `KLIP_DEMO_EXPORT=open|run` open the export dialog (and start rendering)
 //! - `KLIP_DEMO_FULLSCREEN=1` open the full-screen preview
+//! - `KLIP_DEMO_TRANSITION=slideleft`, `KLIP_DEMO_FILTER=film`,
+//!   `KLIP_DEMO_TRANSFORM=scale,x,y,deg` pre-apply effects
 //! - `KLIP_MUTE=1`             no preview audio
 //! - `KLIP_SCREENSHOT=out.png`  save a screenshot after `KLIP_SCREENSHOT_DELAY` s, then quit
 
@@ -25,6 +27,11 @@ pub struct Dev {
 }
 
 impl Dev {
+    /// Running under automation: no autosave, no prompts.
+    pub fn active(&self) -> bool {
+        self.demo || self.shot.is_some()
+    }
+
     pub fn from_env() -> Self {
         Self {
             demo: std::env::var_os("KLIP_DEMO").is_some(),
@@ -48,6 +55,48 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
             Ok("audio") => app.project.audio.first().map_or(Selection::None, |c| Selection::Audio(c.id)),
             _ => Selection::None,
         };
+        // KLIP_DEMO_TRANSITION=slideleft  → on every cut
+        if let Ok(name) = std::env::var("KLIP_DEMO_TRANSITION") {
+            if let Some(k) = crate::fx::TransitionKind::ALL.into_iter().find(|k| k.xfade() == name || format!("{k:?}").eq_ignore_ascii_case(&name)) {
+                app.apply_transition_all(k, 0.8);
+            }
+        }
+        // KLIP_DEMO_FILTER=film  → first clip
+        if let Ok(name) = std::env::var("KLIP_DEMO_FILTER") {
+            if let Some(f) = crate::fx::FilterPreset::ALL.into_iter().find(|f| f.label().eq_ignore_ascii_case(&name)) {
+                if let Some(c) = app.project.video.first_mut() {
+                    c.filter = f;
+                }
+            }
+        }
+        // KLIP_DEMO_TRANSFORM=scale,x,y,rotation  → first clip
+        if let Ok(v) = std::env::var("KLIP_DEMO_TRANSFORM") {
+            let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if let (Some(c), [s, x, y, r]) = (app.project.video.first_mut(), n.as_slice()) {
+                c.scale = *s;
+                c.x = *x;
+                c.y = *y;
+                c.rotation = *r;
+            }
+        }
+        if let Some(t) = std::env::var("KLIP_DEMO_SEEK").ok().and_then(|v| v.parse::<f64>().ok()) {
+            app.seek(t);
+        }
+        if std::env::var("KLIP_DEMO_SELECT").as_deref() == Ok("transition") {
+            if let Some(c) = app.project.video.first() {
+                app.selection = Selection::Transition(c.id);
+            }
+        }
+        if let Some(z) = std::env::var("KLIP_DEMO_VIEWZOOM").ok().and_then(|v| v.parse::<f32>().ok()) {
+            app.view_zoom = z;
+        }
+        // KLIP_DEMO_ZOOM=out → fully zoomed out (clamped to the fit limit)
+        if std::env::var("KLIP_DEMO_ZOOM").as_deref() == Ok("out") {
+            app.tl.pps = 0.0;
+        }
+        if std::env::var_os("KLIP_DEMO_FULLSCREEN").is_some() {
+            app.set_fullscreen(true);
+        }
         match std::env::var("KLIP_DEMO_EXPORT").as_deref() {
             Ok("open") => app.export.open = true,
             Ok("run") => {
@@ -57,9 +106,6 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
             }
             _ => {}
         }
-        if std::env::var_os("KLIP_DEMO_FULLSCREEN").is_some() {
-            app.set_fullscreen(true);
-        }
         if std::env::var_os("KLIP_DEMO_PLAY").is_some() {
             app.toggle_play();
         }
@@ -67,6 +113,8 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
             Ok("audio") => LeftTab::Audio,
             Ok("text") => LeftTab::Text,
             Ok("captions") => LeftTab::Captions,
+            Ok("transitions") => LeftTab::Transitions,
+            Ok("filters") => LeftTab::Filters,
             _ => LeftTab::Media,
         };
     }

@@ -6,10 +6,12 @@
 //! - drag a clip edge: trim; edges snap to playhead and other clip edges
 //! - wheel: scroll, Ctrl+wheel: zoom around the cursor
 
-use crate::app::{AudioDrag, ClipKind, DragMode, KlipApp, MediaDrag, Selection, TlDrag};
+use crate::app::{AudioDrag, ClipKind, DragMode, KlipApp, LeftTab, MediaDrag, Selection, TlDrag};
+use crate::fx::TransitionKind;
 use crate::media::WAVE_RATE;
 use crate::model::{FPS, Id, MediaKind};
 use crate::theme::*;
+use crate::ui::MAX_PPS;
 use crate::ui::library::{elide, round_mask};
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use egui_phosphor::regular as ph;
@@ -63,6 +65,19 @@ fn lanes(items: &[(Id, f64, f64)]) -> (HashMap<Id, usize>, usize) {
 pub fn timeline(app: &mut KlipApp, ui: &mut egui::Ui) {
     let full = ui.available_rect_before_wrap();
     ui.allocate_rect(full, Sense::hover());
+    // Zoom limits: fully out = whole project (+ a little room) fits on screen.
+    let project_end = app
+        .project
+        .texts
+        .iter()
+        .map(|t| t.end())
+        .chain(app.project.audio.iter().map(|a| a.end()))
+        .fold(app.project.duration(), f64::max)
+        .max(5.0);
+    let content_w = (full.width() - HEADER_W - 10.0).max(100.0);
+    let fit_pps = (content_w / (project_end as f32 * 1.05)).min(MAX_PPS);
+    app.tl.min_pps = fit_pps.min(4.0).max(0.005);
+    app.tl.pps = app.tl.pps.clamp(app.tl.min_pps, MAX_PPS);
     let toolbar = Rect::from_min_size(full.min, Vec2::new(full.width(), TOOLBAR_H));
     toolbar_ui(app, ui, toolbar);
 
@@ -80,7 +95,7 @@ pub fn timeline(app: &mut KlipApp, ui: &mut egui::Ui) {
             let px = pointer.unwrap().x;
             let g = Geo { content, pps: app.tl.pps as f64, scroll: app.tl.scroll };
             let anchor = g.t(px);
-            app.tl.pps = (app.tl.pps * zoom).clamp(4.0, 800.0);
+            app.tl.pps = (app.tl.pps * zoom).clamp(app.tl.min_pps, MAX_PPS);
             app.tl.scroll = anchor - (px - content.left()) as f64 / app.tl.pps as f64;
         } else if scroll != Vec2::ZERO {
             app.tl.scroll -= (scroll.x + scroll.y) as f64 / app.tl.pps as f64;
@@ -317,6 +332,57 @@ pub fn timeline(app: &mut KlipApp, ui: &mut egui::Ui) {
                 if let Some(t) = ptr_t {
                     app.tl.drag = begin_drag(app, *kind, *id, mode, t);
                 }
+            }
+        }
+    }
+
+    // ------------------------------------------- transitions / cut markers
+    // A transition shows as a badge over the overlap; a hard cut reveals a
+    // small "add transition" button when hovered.
+    let starts_now = app.project.video_starts();
+    let joints: Vec<(usize, Id, f64, f64)> = (0..app.project.video.len().saturating_sub(1))
+        .map(|k| {
+            let d = app.project.trans_dur(k);
+            let mid = if d > 0.0 { starts_now[k + 1] + d / 2.0 } else { starts_now[k + 1] };
+            (k, app.project.video[k].id, d, mid)
+        })
+        .collect();
+    let dragging_anything = !matches!(app.tl.drag, TlDrag::None);
+    for (_k, id, d, mid) in joints {
+        let cx = g.x(mid);
+        if cx < content.left() - 20.0 || cx > content.right() + 20.0 {
+            continue;
+        }
+        let jid = ui.id().with(("joint", id));
+        if d > 0.0 {
+            let w = ((d * g.pps) as f32).max(28.0);
+            let r = Rect::from_center_size(Pos2::new(cx, main_row.center().y + 8.0), Vec2::new(w, 24.0));
+            let resp = ui.interact(r, jid, Sense::click());
+            let sel = app.selection == Selection::Transition(id);
+            let h = anim(ui, ("joint_h", id), resp.hovered());
+            let s = anim(ui, ("joint_s", id), sel);
+            let fill = mix(mix(Color32::from_black_alpha(185), Color32::from_black_alpha(225), h), ACCENT, s);
+            clip_painter.rect_filled(r, CornerRadius::same(R_SM), fill);
+            clip_painter.rect_stroke(r, CornerRadius::same(R_SM), Stroke::new(1.0, mix(Color32::from_white_alpha(90), Color32::WHITE, s.max(h))), StrokeKind::Inside);
+            clip_painter.text(r.center(), Align2::CENTER_CENTER, ph::ARROWS_LEFT_RIGHT, FontId::proportional(14.0), Color32::WHITE);
+            if resp.on_hover_text("Transition").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                app.selection = Selection::Transition(id);
+            }
+        } else {
+            let r = Rect::from_center_size(Pos2::new(cx, main_row.center().y + 8.0), Vec2::splat(24.0));
+            let near = !dragging_anything && pointer.is_some_and(|p| main_row.contains(p) && (p.x - cx).abs() < 16.0);
+            let resp = ui.interact(r, jid, Sense::click());
+            let vis = anim(ui, ("joint_v", id), near || resp.hovered());
+            if vis > 0.01 {
+                let h = anim(ui, ("joint_h", id), resp.hovered());
+                clip_painter.rect_filled(r, CornerRadius::same(R_SM), mix(BG1, ACCENT, h).gamma_multiply(vis));
+                clip_painter.rect_stroke(r, CornerRadius::same(R_SM), Stroke::new(1.0, Color32::from_white_alpha((160.0 * vis) as u8)), StrokeKind::Inside);
+                clip_painter.text(r.center(), Align2::CENTER_CENTER, ph::PLUS, FontId::proportional(13.0), Color32::from_white_alpha((255.0 * vis) as u8));
+            }
+            if vis > 0.5 && resp.on_hover_text("Add transition").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                app.selection = Selection::Video(id);
+                app.apply_transition(TransitionKind::Mix);
+                app.left_tab = LeftTab::Transitions;
             }
         }
     }
@@ -650,7 +716,7 @@ fn paint_video_clip(app: &KlipApp, p: &egui::Painter, r: Rect, id: Id, sel: bool
     ip.text(
         Pos2::new(lx, label_r.center().y),
         Align2::LEFT_CENTER,
-        format!("{}{:.1}s  {}", if muted { format!("{} ", ph::SPEAKER_SLASH) } else { String::new() }, c.dur(), elide(name, r.width() - 70.0, 6.2)),
+        format!("{}{}  {}", if muted { format!("{} ", ph::SPEAKER_SLASH) } else { String::new() }, clip_len(c.dur()), elide(name, r.width() - 70.0, 6.2)),
         FontId::proportional(10.5),
         Color32::WHITE.gamma_multiply(alpha),
     );
@@ -663,8 +729,8 @@ fn paint_video_clip(app: &KlipApp, p: &egui::Painter, r: Rect, id: Id, sel: bool
 }
 
 fn paint_ruler(p: &egui::Painter, g: &Geo, r: Rect) {
-    let steps = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0];
-    let major = steps.iter().copied().find(|s| s * g.pps >= 80.0).unwrap_or(600.0);
+    let steps = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0];
+    let major = steps.iter().copied().find(|s| s * g.pps >= 80.0).unwrap_or(7200.0);
     let minor = major / 5.0;
     let t0 = (g.scroll / minor).floor() * minor;
     let t1 = g.t(r.right());
@@ -681,7 +747,11 @@ fn paint_ruler(p: &egui::Painter, g: &Geo, r: Rect) {
                     format!("{t:.1}s")
                 } else {
                     let s = t.round() as i64;
-                    format!("{:02}:{:02}", s / 60, s % 60)
+                    if s >= 3600 {
+                        format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+                    } else {
+                        format!("{:02}:{:02}", s / 60, s % 60)
+                    }
                 };
                 p.text(Pos2::new(x + 4.0, r.top() + 9.0), Align2::LEFT_CENTER, label, FontId::proportional(10.0), TEXT_DIM);
             }
@@ -728,20 +798,29 @@ fn toolbar_ui(app: &mut KlipApp, ui: &mut egui::Ui, r: Rect) {
         if icon_button(ui, ph::ARROWS_OUT_LINE_HORIZONTAL, "Fit timeline to window", true).clicked() {
             let total = app.project.duration().max(5.0);
             let w = (ui.ctx().content_rect().width() - HEADER_W - 80.0).max(200.0);
-            app.tl.pps = (w / total as f32 * 0.95).clamp(4.0, 800.0);
+            app.tl.pps = (w / total as f32 * 0.95).clamp(app.tl.min_pps, MAX_PPS);
             app.tl.scroll = 0.0;
         }
         if icon_button(ui, ph::MAGNIFYING_GLASS_PLUS, "Zoom in (+)", true).clicked() {
-            app.tl.pps = (app.tl.pps * 1.25).min(800.0);
+            app.tl.pps = (app.tl.pps * 1.25).min(MAX_PPS);
         }
         let mut z = app.tl.pps.ln();
-        ui.spacing_mut().slider_width = 110.0;
-        if ui.add(egui::Slider::new(&mut z, 4f32.ln()..=800f32.ln()).show_value(false)).changed() {
+        if slider(ui, &mut z, app.tl.min_pps.ln()..=MAX_PPS.ln(), 110.0).changed() {
             app.tl.pps = z.exp();
         }
         if icon_button(ui, ph::MAGNIFYING_GLASS_MINUS, "Zoom out (-)", true).clicked() {
-            app.tl.pps = (app.tl.pps / 1.25).max(4.0);
+            app.tl.pps = (app.tl.pps / 1.25).max(app.tl.min_pps);
         }
     });
     ui.painter().hline(r.x_range().shrink(10.0), r.bottom(), Stroke::new(1.0, BORDER));
+}
+
+/// Short clip length for labels: "4.2s", or "35:32" / "1:02:10" when long.
+fn clip_len(d: f64) -> String {
+    if d < 60.0 {
+        format!("{d:.1}s")
+    } else {
+        let s = d.round() as i64;
+        if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+    }
 }

@@ -1,11 +1,11 @@
 //! Export: turn the project into one ffmpeg command with a filter graph.
 //!
-//!   main track clips ──scale/crop/blur──┐
-//!                                      concat ── drawtext… ──► video
-//!   clip audio / silence ───────────────┘   └── amix(music…) ──► audio
+//! Each main-track clip is graded, placed on its background with the user's
+//! transform, faded, then joined to its neighbour with xfade (transition) or
+//! concat (hard cut). Text is drawn on top and music mixed in.
 
 use crate::media::ffmpeg;
-use crate::model::{FitMode, MediaKind, Project, TextStyle, FPS};
+use crate::model::{FitMode, MediaKind, Project, TextStyle, FPS, base_size};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -81,59 +81,105 @@ pub fn build_args(p: &Project, s: &ExportSettings, tmp: &Path) -> Result<Vec<Str
     let mut input = 0usize;
 
     // --- main track -------------------------------------------------------
+    // Each clip: [optional grade] → background (black or blurred copy) with
+    // the frame scaled/rotated/offset on top → fades. Clips are then chained
+    // with xfade/acrossfade at transitions and concat at hard cuts.
     for (i, c) in p.video.iter().enumerate() {
         let m = p.media(c.media).ok_or("Missing media for a clip")?;
+        let dur = c.dur();
         if m.kind == MediaKind::Image {
             args.extend(["-loop", "1", "-framerate", "30"].map(String::from));
-            args.extend(["-t".into(), format!("{:.3}", c.dur())]);
+            args.extend(["-t".into(), format!("{dur:.3}")]);
         } else {
             args.extend(["-ss".into(), format!("{:.3}", c.src_in)]);
-            args.extend(["-t".into(), format!("{:.3}", c.dur())]);
+            args.extend(["-t".into(), format!("{dur:.3}")]);
         }
         args.extend(["-i".into(), m.path.to_string_lossy().into_owned()]);
         let n = input;
         input += 1;
 
-        let pre = format!("[{n}:v]fps={FPS},setpts=PTS-STARTPTS");
-        let cover = format!("scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}");
-        let contain = format!("scale={w}:{h}:force_original_aspect_ratio=decrease");
-        match c.fit {
-            FitMode::Fill => {
-                let _ = write!(fg, "{pre},{cover},setsar=1,format=yuv420p[v{i}];");
-            }
-            FitMode::Fit => {
-                let _ = write!(
-                    fg,
-                    "{pre},{contain},pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v{i}];"
-                );
-            }
-            FitMode::Blur => {
-                let r = (w.min(h) / 24).max(4);
-                let _ = write!(
-                    fg,
-                    "{pre},split[b{i}][f{i}];[b{i}]scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh},boxblur={br}:2,scale={w}:{h},eq=brightness=-0.08[bb{i}];\
-                     [f{i}]{contain}[ff{i}];[bb{i}][ff{i}]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[v{i}];",
-                    sw = even(w as f32 / 4.0),
-                    sh = even(h as f32 / 4.0),
-                    br = r / 4,
-                );
-            }
+        let grade = c.grade().ffmpeg();
+        let grade = if grade.is_empty() { String::new() } else { format!(",{grade}") };
+        let _ = write!(fg, "[{n}:v]fps={FPS},setpts=PTS-STARTPTS,setsar=1{grade},split[b{i}][f{i}];");
+
+        // Background.
+        if c.fit == FitMode::Blur {
+            let (sw, sh) = (even(w as f32 / 4.0), even(h as f32 / 4.0));
+            let br = ((w.min(h) / 24).max(4)) / 4;
+            let _ = write!(
+                fg,
+                "[b{i}]scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh},boxblur={br}:2,scale={w}:{h},eq=brightness=-0.08,format=yuv420p[bg{i}];"
+            );
+        } else {
+            let _ = write!(fg, "[b{i}]nullsink;color=c=black:s={w}x{h}:r={FPS}:d={dur:.3},format=yuv420p[bg{i}];");
         }
-        let dur = c.dur();
+
+        // Foreground: base size from `fit`, then the user's transform.
+        let (bw, bh) = base_size(c.fit, m.width as f32, m.height as f32, w as f32, h as f32);
+        let scale = c.scale.clamp(0.05, 4.0);
+        let (fw, fh) = (even(bw * scale), even(bh * scale));
+        let rot = if c.rotation.abs() > 1e-3 {
+            let r = c.rotation.to_radians();
+            let ow = even(fw as f32 * r.cos().abs() + fh as f32 * r.sin().abs());
+            let oh = even(fw as f32 * r.sin().abs() + fh as f32 * r.cos().abs());
+            format!(",format=rgba,rotate=a={r:.6}:ow={ow}:oh={oh}:c=none")
+        } else {
+            String::new()
+        };
+        let (dx, dy) = ((c.x * w as f32).round() as i32, (c.y * h as f32).round() as i32);
+        let _ = write!(
+            fg,
+            "[f{i}]scale={fw}:{fh}:flags=bicubic{rot}[fg{i}];[bg{i}][fg{i}]overlay=x=(W-w)/2+({dx}):y=(H-h)/2+({dy}):eof_action=pass,format=yuv420p,setsar=1"
+        );
+        if c.fade_in > 0.0 {
+            let _ = write!(fg, ",fade=t=in:st=0:d={:.3}", c.fade_in);
+        }
+        if c.fade_out > 0.0 {
+            let _ = write!(fg, ",fade=t=out:st={:.3}:d={:.3}", (dur - c.fade_out as f64).max(0.0), c.fade_out);
+        }
+        let _ = write!(fg, ",trim=duration={dur:.3},settb=AVTB[v{i}];");
+
+        // Audio (silence for clips without sound).
         if m.has_audio {
             let _ = write!(
                 fg,
-                "[{n}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={:.3},apad,atrim=0:{dur:.3},asetpts=PTS-STARTPTS[a{i}];",
+                "[{n}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={:.3},apad,atrim=0:{dur:.3},asetpts=PTS-STARTPTS",
                 c.volume
             );
         } else {
-            let _ = write!(fg, "anullsrc=r=48000:cl=stereo,atrim=0:{dur:.3},aformat=sample_fmts=fltp[a{i}];");
+            let _ = write!(fg, "anullsrc=r=48000:cl=stereo,atrim=0:{dur:.3},aformat=sample_fmts=fltp");
         }
+        if c.fade_in > 0.0 {
+            let _ = write!(fg, ",afade=t=in:st=0:d={:.3}", c.fade_in);
+        }
+        if c.fade_out > 0.0 {
+            let _ = write!(fg, ",afade=t=out:st={:.3}:d={:.3}", (dur - c.fade_out as f64).max(0.0), c.fade_out);
+        }
+        let _ = write!(fg, "[a{i}];");
     }
-    for i in 0..p.video.len() {
-        let _ = write!(fg, "[v{i}][a{i}]");
+
+    // Join clips: xfade/acrossfade where there's a transition, concat otherwise.
+    let (mut av, mut aa) = ("v0".to_string(), "a0".to_string());
+    let mut acc = p.video[0].dur();
+    for k in 1..p.video.len() {
+        let d = p.trans_dur(k - 1);
+        let (nv, na) = (format!("jv{k}"), format!("ja{k}"));
+        if d > 0.0 {
+            let kind = p.video[k - 1].transition.map(|t| t.kind.xfade()).unwrap_or("fade");
+            let _ = write!(
+                fg,
+                "[{av}][v{k}]xfade=transition={kind}:duration={d:.3}:offset={:.3}[{nv}];[{aa}][a{k}]acrossfade=d={d:.3}[{na}];",
+                (acc - d).max(0.0)
+            );
+            acc += p.video[k].dur() - d;
+        } else {
+            let _ = write!(fg, "[{av}][{aa}][v{k}][a{k}]concat=n=2:v=1:a=1[{nv}][{na}];");
+            acc += p.video[k].dur();
+        }
+        av = nv;
+        aa = na;
     }
-    let _ = write!(fg, "concat=n={}:v=1:a=1[vcat][acat];", p.video.len());
+    let _ = write!(fg, "[{av}]null[vcat];[{aa}]anull[acat];");
 
     // --- text overlays ----------------------------------------------------
     let mut vlabel = "vcat".to_string();
@@ -283,12 +329,30 @@ mod tests {
     use super::*;
     use crate::model::*;
 
-    /// End-to-end render. Run with:
-    /// `KLIP_TEST_MEDIA=/dir/with/landscape.mp4,portrait.mp4,photo.png,music.mp3 cargo test -- --ignored`
+    /// Synthesise small test clips with ffmpeg (cached between runs).
+    fn gen_media(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let jobs: [(&str, &[&str]); 4] = [
+            ("landscape.mp4", &["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "6", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"]),
+            ("portrait.mp4", &["-f", "lavfi", "-i", "testsrc2=size=720x1280:rate=30", "-f", "lavfi", "-i", "sine=frequency=660", "-t", "5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"]),
+            ("photo.png", &["-f", "lavfi", "-i", "smptebars=size=1200x800", "-frames:v", "1"]),
+            ("music.mp3", &["-f", "lavfi", "-i", "sine=frequency=220:duration=12", "-c:a", "libmp3lame"]),
+        ];
+        for (name, a) in jobs {
+            let out = dir.join(name);
+            if !out.exists() {
+                let ok = std::process::Command::new("ffmpeg").args(["-v", "error", "-y"]).args(a).arg(&out).status().unwrap();
+                assert!(ok.success(), "could not generate {name}");
+            }
+        }
+    }
+
+    /// End-to-end render (slow, ~5 s): `cargo test -- --ignored`
     #[test]
     #[ignore]
     fn renders_full_project() {
-        let dir = PathBuf::from(std::env::var("KLIP_TEST_MEDIA").expect("KLIP_TEST_MEDIA"));
+        let dir = std::env::temp_dir().join("klip_test_media");
+        gen_media(&dir);
         let mut p = Project::default();
         let mut add = |p: &mut Project, f: &str| {
             let mut m = crate::media::probe(&dir.join(f)).unwrap();
@@ -304,8 +368,18 @@ mod tests {
         assert_eq!(music.kind, MediaKind::Audio);
         for (m, fit, a, b) in [(&land, FitMode::Blur, 1.0, 3.0), (&port, FitMode::Fill, 0.0, 2.0), (&photo, FitMode::Fit, 0.0, 1.5), (&land, FitMode::Fit, 4.0, 5.0)] {
             let id = p.new_id();
-            p.video.push(VideoClip { id, media: m.id, src_in: a, src_out: b, fit, volume: 1.0 });
+            p.video.push(VideoClip::new(id, m.id, a, b, fit));
         }
+        // New features: transform, rotation, grade, fades, transitions.
+        p.video[0].scale = 1.3;
+        p.video[0].x = 0.1;
+        p.video[0].rotation = 8.0;
+        p.video[0].filter = crate::fx::FilterPreset::Film;
+        p.video[0].fade_in = 0.5;
+        p.video[0].transition = Some(crate::fx::Transition { kind: crate::fx::TransitionKind::SlideLeft, dur: 0.5 });
+        p.video[1].adjust.saturation = 1.4;
+        p.video[1].transition = Some(crate::fx::Transition { kind: crate::fx::TransitionKind::Mix, dur: 0.4 });
+        p.video[3].fade_out = 0.4;
         for (i, st) in TextStyle::ALL.iter().enumerate() {
             let id = p.new_id();
             p.texts.push(TextClip { id, text: format!("Style {} it's: \"quoted\"\nline two", st.label()), start: i as f64, dur: 2.0, x: 0.5, y: 0.2 + i as f32 * 0.2, size: 70.0, color: [255, 214, 10], style: *st, is_caption: false });
