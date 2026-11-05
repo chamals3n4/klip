@@ -1,6 +1,7 @@
 //! Right panel: properties of the selected clip, or project info.
 
-use crate::app::{KlipApp, Selection};
+use crate::app::{KlipApp, LeftTab, Selection, VideoTab};
+use crate::fx::FilterPreset;
 use crate::model::{Aspect, FitMode, MediaKind, TextStyle, timecode};
 use crate::theme::*;
 use egui::{Color32, CornerRadius, Margin, RichText, Sense, Stroke, StrokeKind, Vec2};
@@ -17,6 +18,7 @@ pub fn inspector(app: &mut KlipApp, ui: &mut egui::Ui) {
             }
         }
         Selection::Audio(_) => (ph::MUSIC_NOTES, "Audio"),
+        Selection::Transition(_) => (ph::ARROWS_LEFT_RIGHT, "Transition"),
         Selection::None => (ph::INFO, "Details"),
     };
     egui::Frame::new().inner_margin(Margin::symmetric(16, 14)).show(ui, |ui| {
@@ -31,6 +33,7 @@ pub fn inspector(app: &mut KlipApp, ui: &mut egui::Ui) {
     let key = match app.selection {
         Selection::None => 0,
         Selection::Video(id) | Selection::Text(id) | Selection::Audio(id) => id,
+        Selection::Transition(id) => id ^ 0x5eed,
     };
     ui.set_opacity(fade_in(ui, "inspector", key));
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -40,6 +43,7 @@ pub fn inspector(app: &mut KlipApp, ui: &mut egui::Ui) {
                 Selection::Video(id) => video_props(app, ui, id),
                 Selection::Text(id) => text_props(app, ui, id),
                 Selection::Audio(id) => audio_props(app, ui, id),
+                Selection::Transition(id) => transition_props(app, ui, id),
                 Selection::None => project_props(app, ui),
             }
         });
@@ -72,7 +76,7 @@ fn video_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
     let Some(i) = app.project.video_index(id) else { return };
     let media = app.project.media(app.project.video[i].media).cloned();
     if let Some(m) = &media {
-        ui.label(RichText::new(&m.name).color(TEXT).strong());
+        ui.label(RichText::new(&m.name).color(TEXT).family(medium_family()));
         ui.label(
             RichText::new(match m.kind {
                 MediaKind::Image => format!("Photo · {}×{}", m.width, m.height),
@@ -83,43 +87,191 @@ fn video_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
         );
     }
     ui.add_space(10.0);
-    section(ui, "Canvas");
-    let before = app.project.video[i].fit;
-    fit_picker(ui, &mut app.project.video[i].fit);
-    if app.project.video[i].fit != before {
-        app.invalidate_preview();
+    let has_audio = media.as_ref().is_some_and(|m| m.has_audio);
+    let mut tabs = vec![(VideoTab::Basic, "Basic"), (VideoTab::Adjust, "Adjust")];
+    if has_audio {
+        tabs.push((VideoTab::Audio, "Audio"));
+    } else if app.video_tab == VideoTab::Audio {
+        app.video_tab = VideoTab::Basic;
     }
-    ui.add_space(4.0);
-    if ui.add(egui::Button::new(RichText::new("Apply to all clips").size(12.5).color(ACCENT)).frame_when_inactive(false)).clicked() {
-        let f = app.project.video[i].fit;
-        app.project.video.iter_mut().for_each(|c| c.fit = f);
-    }
+    segmented(ui, &mut app.video_tab, &tabs);
+    ui.add_space(8.0);
 
-    ui.add_space(10.0);
-    section(ui, "Timing");
-    let is_image = media.as_ref().is_some_and(|m| m.kind == MediaKind::Image);
-    let max = media.as_ref().map(|m| if is_image { 3600.0 } else { m.duration }).unwrap_or(0.0);
-    let c = &mut app.project.video[i];
-    let mut dur = c.dur();
-    row(ui, "Duration", |ui| {
-        if ui.add(egui::DragValue::new(&mut dur).range(0.1..=(max - c.src_in).max(0.1)).speed(0.05).suffix(" s").max_decimals(2)).changed() {
-            c.src_out = c.src_in + dur;
+    match app.video_tab {
+        VideoTab::Basic => {
+            section(ui, "Transform");
+            let c = &mut app.project.video[i];
+            let mut pct = c.scale * 100.0;
+            if slider_row(ui, "Scale", &mut pct, 5.0..=400.0, 100.0, num("%", 0, 1.0)) {
+                c.scale = pct / 100.0;
+            }
+            let (cw, ch) = app.project.aspect.canvas();
+            let c = &mut app.project.video[i];
+            let mut px = c.x * cw as f32;
+            let mut py = c.y * ch as f32;
+            ui.horizontal(|ui| {
+                ui.add_sized(Vec2::new(80.0, 28.0), egui::Label::new(RichText::new("Position").color(TEXT_DIM)));
+                ui.label(RichText::new("X").size(12.0).color(TEXT_FAINT));
+                if value_box(ui, &mut px, -4000.0..=4000.0, num("", 0, 1.0)) {
+                    c.x = px / cw as f32;
+                }
+                ui.label(RichText::new("Y").size(12.0).color(TEXT_FAINT));
+                if value_box(ui, &mut py, -4000.0..=4000.0, num("", 0, 1.0)) {
+                    c.y = py / ch as f32;
+                }
+            });
+            slider_row(ui, "Rotate", &mut c.rotation, -180.0..=180.0, 0.0, num("°", 0, 1.0));
+            if c.has_transform() && link_button(ui, "Reset transform").clicked() {
+                c.scale = 1.0;
+                c.x = 0.0;
+                c.y = 0.0;
+                c.rotation = 0.0;
+            }
+
+            ui.add_space(10.0);
+            section(ui, "Canvas");
+            let before = app.project.video[i].fit;
+            fit_picker(ui, &mut app.project.video[i].fit);
+            if app.project.video[i].fit != before {
+                app.invalidate_preview();
+            }
+            if link_button(ui, "Apply to all clips").clicked() {
+                let f = app.project.video[i].fit;
+                app.project.video.iter_mut().for_each(|c| c.fit = f);
+            }
+
+            ui.add_space(10.0);
+            section(ui, "Fade");
+            let c = &mut app.project.video[i];
+            let max = (c.dur() as f32 / 2.0).clamp(0.1, 3.0);
+            slider_row(ui, "Fade in", &mut c.fade_in, 0.0..=max, 0.0, num("s", 1, 0.1));
+            slider_row(ui, "Fade out", &mut c.fade_out, 0.0..=max, 0.0, num("s", 1, 0.1));
+
+            ui.add_space(10.0);
+            section(ui, "Timing");
+            let is_image = media.as_ref().is_some_and(|m| m.kind == MediaKind::Image);
+            let max = media.as_ref().map(|m| if is_image { 3600.0 } else { m.duration }).unwrap_or(0.0);
+            let c = &mut app.project.video[i];
+            let mut dur = c.dur();
+            row(ui, "Duration", |ui| {
+                if ui.add(egui::DragValue::new(&mut dur).range(0.1..=(max - c.src_in).max(0.1)).speed(0.05).suffix(" s").max_decimals(2)).changed() {
+                    c.src_out = c.src_in + dur;
+                }
+            });
+            if !is_image {
+                let src_out = c.src_out;
+                row(ui, "Trim in", |ui| {
+                    ui.add(egui::DragValue::new(&mut c.src_in).range(0.0..=(src_out - 0.1)).speed(0.05).suffix(" s").max_decimals(2));
+                });
+            }
         }
-    });
-    if !is_image {
-        let src_out = c.src_out;
-        row(ui, "Trim in", |ui| {
-            ui.add(egui::DragValue::new(&mut c.src_in).range(0.0..=(src_out - 0.1)).speed(0.05).suffix(" s").max_decimals(2));
-        });
-    }
-
-    if media.as_ref().is_some_and(|m| m.has_audio) {
-        ui.add_space(10.0);
-        section(ui, "Audio");
-        let c = &mut app.project.video[i];
-        volume_row(ui, &mut c.volume);
+        VideoTab::Adjust => {
+            let c = &mut app.project.video[i];
+            section(ui, "Filter");
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(c.filter.label()).color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if link_button(ui, "Browse").clicked() {
+                        app.left_tab = LeftTab::Filters;
+                    }
+                });
+            });
+            let c = &mut app.project.video[i];
+            if c.filter != FilterPreset::None {
+                let mut amt = c.filter_amount * 100.0;
+                if slider_row(ui, "Intensity", &mut amt, 0.0..=100.0, 100.0, num("%", 0, 1.0)) {
+                    c.filter_amount = amt / 100.0;
+                }
+            }
+            ui.add_space(10.0);
+            section(ui, "Adjust");
+            let a = &mut c.adjust;
+            let mut b = a.brightness * 200.0;
+            if slider_row(ui, "Brightness", &mut b, -100.0..=100.0, 0.0, num("", 0, 1.0)) {
+                a.brightness = b / 200.0;
+            }
+            let mut ct = (a.contrast - 1.0) * 200.0;
+            if slider_row(ui, "Contrast", &mut ct, -100.0..=100.0, 0.0, num("", 0, 1.0)) {
+                a.contrast = 1.0 + ct / 200.0;
+            }
+            let mut st = (a.saturation - 1.0) * 100.0;
+            if slider_row(ui, "Saturation", &mut st, -100.0..=100.0, 0.0, num("", 0, 1.0)) {
+                a.saturation = 1.0 + st / 100.0;
+            }
+            let mut tp = a.temperature * 100.0;
+            if slider_row(ui, "Temperature", &mut tp, -100.0..=100.0, 0.0, num("", 0, 1.0)) {
+                a.temperature = tp / 100.0;
+            }
+            let mut fd = a.fade * 100.0;
+            if slider_row(ui, "Fade", &mut fd, 0.0..=100.0, 0.0, num("", 0, 1.0)) {
+                a.fade = fd / 100.0;
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let c = &mut app.project.video[i];
+                if (!c.adjust.is_identity() || c.filter != FilterPreset::None) && link_button(ui, "Reset").clicked() {
+                    c.adjust = Default::default();
+                    c.filter = FilterPreset::None;
+                    c.filter_amount = 1.0;
+                }
+                if link_button(ui, "Apply to all clips").clicked() {
+                    let (f, amt, adj) = (c.filter, c.filter_amount, c.adjust);
+                    for o in app.project.video.iter_mut() {
+                        o.filter = f;
+                        o.filter_amount = amt;
+                        o.adjust = adj;
+                    }
+                }
+            });
+        }
+        VideoTab::Audio => {
+            section(ui, "Volume");
+            volume_row(ui, &mut app.project.video[i].volume);
+        }
     }
     actions(app, ui);
+}
+
+fn transition_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
+    let Some(i) = app.project.video_index(id) else { return };
+    let Some(mut t) = app.project.video[i].transition else { return };
+    let names = |k: usize| {
+        app.project
+            .video
+            .get(k)
+            .and_then(|c| app.project.media(c.media))
+            .map(|m| m.name.clone())
+            .unwrap_or_default()
+    };
+    ui.label(
+        RichText::new(format!("{}  →  {}", super::library::elide(&names(i), 120.0, 7.0), super::library::elide(&names(i + 1), 120.0, 7.0)))
+            .size(12.5)
+            .color(TEXT_DIM),
+    );
+    ui.add_space(10.0);
+    section(ui, "Style");
+    if let Some(k) = super::library::transition_grid(ui, Some(t.kind), 3) {
+        t.kind = k;
+    }
+    ui.add_space(10.0);
+    section(ui, "Duration");
+    let max = (app.project.video[i].dur().min(app.project.video[i + 1].dur()) * 0.5).max(0.1) as f32;
+    let mut d = t.dur as f32;
+    if slider_row(ui, "Duration", &mut d, 0.1..=max.min(3.0), 0.5, num("s", 1, 0.1)) {
+        t.dur = d as f64;
+    }
+    app.project.video[i].transition = Some(t);
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        if secondary_button(ui, "Apply to all cuts").clicked() {
+            app.apply_transition_all(t.kind, t.dur);
+        }
+        if secondary_button(ui, format!("{}  Remove", ph::TRASH)).clicked() {
+            app.project.video[i].transition = None;
+            app.selection = Selection::Video(id);
+            app.invalidate_preview();
+        }
+    });
 }
 
 fn fit_picker(ui: &mut egui::Ui, fit: &mut FitMode) {
@@ -159,16 +311,14 @@ fn fit_picker(ui: &mut egui::Ui, fit: &mut FitMode) {
 }
 
 fn volume_row(ui: &mut egui::Ui, v: &mut f32) {
-    row(ui, "Volume", |ui| {
-        let icon = if *v <= 0.001 { ph::SPEAKER_SLASH } else { ph::SPEAKER_HIGH };
-        if ui.add(egui::Button::new(icon).frame(false)).on_hover_text("Mute").clicked() {
-            *v = if *v <= 0.001 { 1.0 } else { 0.0 };
-        }
-        let mut pct = *v * 100.0;
-        if ui.add(egui::Slider::new(&mut pct, 0.0..=200.0).suffix("%").max_decimals(0)).changed() {
-            *v = pct / 100.0;
-        }
-    });
+    let mut pct = *v * 100.0;
+    if slider_row(ui, "Volume", &mut pct, 0.0..=200.0, 100.0, num("%", 0, 1.0)) {
+        *v = pct / 100.0;
+    }
+    let muted = *v <= 0.001;
+    if link_button(ui, if muted { "Unmute" } else { "Mute" }).clicked() {
+        *v = if muted { 1.0 } else { 0.0 };
+    }
 }
 
 pub const SWATCHES: [[u8; 3]; 12] = [
@@ -230,20 +380,20 @@ fn text_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
     let opts: Vec<_> = TextStyle::ALL.iter().map(|s| (*s, s.label())).collect();
     segmented(ui, &mut t.style, &opts);
     ui.add_space(6.0);
-    row(ui, "Size", |ui| {
-        ui.add(egui::Slider::new(&mut t.size, 16.0..=220.0).max_decimals(0));
-    });
+    slider_row(ui, "Size", &mut t.size, 16.0..=220.0, 80.0, num("", 0, 1.0));
     ui.add_space(4.0);
     color_swatches(ui, &mut t.color);
 
     ui.add_space(10.0);
     section(ui, "Position");
-    row(ui, "X", |ui| {
-        ui.add(egui::Slider::new(&mut t.x, 0.0..=1.0).show_value(false));
-    });
-    row(ui, "Y", |ui| {
-        ui.add(egui::Slider::new(&mut t.y, 0.0..=1.0).show_value(false));
-    });
+    let mut x = t.x * 100.0;
+    if slider_row(ui, "X", &mut x, 0.0..=100.0, 50.0, num("%", 0, 1.0)) {
+        t.x = x / 100.0;
+    }
+    let mut y = t.y * 100.0;
+    if slider_row(ui, "Y", &mut y, 0.0..=100.0, 50.0, num("%", 0, 1.0)) {
+        t.y = y / 100.0;
+    }
     ui.horizontal(|ui| {
         if ui.small_button("Top").clicked() {
             t.y = 0.18;

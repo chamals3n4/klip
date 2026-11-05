@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod dev;
 mod export;
+mod fx;
 mod media;
 mod model;
 mod theme;

@@ -1,0 +1,140 @@
+# Manual release: Actions → Release → "Run workflow", enter a version.
+#
+# Builds Klip once and packages it as .deb, .rpm and AppImage, then creates
+# the v<version> tag and a GitHub Release with notes generated from the
+# commits / PRs since the previous release.
+#
+# Assets use fixed names so the website can always link to
+#   https://github.com/chamals3n4/klip/releases/latest/download/<file>
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the v (e.g. 0.1.0)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as a pre-release"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish v${{ inputs.version }}
+    # Build on the oldest supported Ubuntu so the binary runs on older glibc too.
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ inputs.version }}
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Version must look like 1.2.3 (got '$VERSION')"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists"
+            exit 1
+          fi
+
+      - name: Set version in Cargo.toml
+        run: |
+          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+          grep -m1 '^version' Cargo.toml
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev libfuse2 file
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install packaging tools
+        run: cargo install --locked cargo-deb cargo-generate-rpm
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Package .deb
+        run: |
+          mkdir -p dist
+          cargo deb --no-build --no-strip --output "dist/klip_amd64.deb"
+
+      - name: Package .rpm
+        run: cargo generate-rpm --output "dist/klip.x86_64.rpm"
+
+      - name: Package AppImage
+        run: |
+          APPDIR=build/Klip.AppDir
+          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+          cp target/release/klip "$APPDIR/usr/bin/"
+          cp packaging/klip.desktop "$APPDIR/klip.desktop"
+          cp packaging/klip.desktop "$APPDIR/usr/share/applications/"
+          cp packaging/klip.png "$APPDIR/klip.png"
+          cp packaging/klip.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
+          cat > "$APPDIR/AppRun" <<'SH'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/klip" "$@"
+          SH
+          chmod +x "$APPDIR/AppRun"
+          curl -fsSL -o build/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x build/appimagetool
+          ARCH=x86_64 build/appimagetool --appimage-extract-and-run "$APPDIR" "dist/klip-x86_64.AppImage"
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Klip v${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          body: |
+            ## Download
+
+            | File | For |
+            |---|---|
+            | `klip-x86_64.AppImage` | Any Linux distro. Make it executable and run it. |
+            | `klip_amd64.deb` | Ubuntu, Debian, Linux Mint, Pop!_OS |
+            | `klip.x86_64.rpm` | Fedora, openSUSE |
+
+            Klip needs **FFmpeg** installed (`sudo apt install ffmpeg`, `sudo dnf install ffmpeg`, `sudo pacman -S ffmpeg`).
+            On Fedora, enable RPM Fusion for H.264 export.
+
+            > Klip is in early development. Things may break or change between versions.
+          files: dist/*

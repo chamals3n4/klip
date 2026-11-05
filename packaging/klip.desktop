@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Klip
+GenericName=Video Editor
+Comment=Edit Reels, Shorts and TikToks
+Exec=klip %F
+Icon=klip
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+Keywords=video;editor;reels;shorts;tiktok;captions;
+MimeType=video/mp4;video/webm;video/x-matroska;video/quicktime;
+StartupWMClass=klip

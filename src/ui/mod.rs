@@ -4,7 +4,11 @@
 //!   │ library │      preview       │ inspector │
 //!   ├─────────────── timeline ────────────────┤
 
+mod dialogs;
 pub mod export_dialog;
+
+/// Most zoomed-in timeline scale (pixels per second).
+pub const MAX_PPS: f32 = 800.0;
 mod inspector;
 mod library;
 mod preview;
@@ -42,8 +46,8 @@ pub fn draw(app: &mut KlipApp, ui: &mut egui::Ui) {
 
     egui::Panel::left("library")
         .resizable(true)
-        .default_size(330.0)
-        .size_range(280.0..=480.0)
+        .default_size(372.0)
+        .size_range(330.0..=520.0)
         .show_separator_line(false)
         .frame(Frame::new().fill(BG0).inner_margin(Margin { left: gap, right: 0, top: 0, bottom: gap }))
         .show(ui, |ui| card(ui, Margin::same(0), |ui| library::library(app, ui)));
@@ -61,6 +65,7 @@ pub fn draw(app: &mut KlipApp, ui: &mut egui::Ui) {
         .show(ui, |ui| card(ui, Margin::same(0), |ui| preview::preview(app, ui)));
 
     export_dialog::export_dialog(app, ui.ctx());
+    dialogs::dialogs(app, ui.ctx());
     os_drop_overlay(ui.ctx());
     toasts(app, ui.ctx());
 }

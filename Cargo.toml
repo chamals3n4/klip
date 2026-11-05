@@ -2,6 +2,9 @@
 name = "klip"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "A fast, focused video editor for Linux, made for Reels, Shorts and TikToks."
+repository = "https://github.com/chamals3n4/klip"
 
 [dependencies]
 crossbeam-channel = "0.5.17"
@@ -21,3 +24,31 @@ opt-level = 2
 
 [profile.release]
 lto = "thin"
+
+# ---- Packaging (used by the release workflow) ------------------------------
+
+[package.metadata.deb]
+maintainer = "chamals3n4"
+copyright = "2026, chamals3n4"
+section = "video"
+priority = "optional"
+depends = "$auto, ffmpeg"
+extended-description = "A fast, focused video editor for Reels, Shorts and TikToks. Trim and arrange clips, add text, captions, music, transitions and filters, and export a ready-to-post MP4."
+assets = [
+  ["target/release/klip", "usr/bin/", "755"],
+  ["packaging/klip.desktop", "usr/share/applications/", "644"],
+  ["packaging/klip.png", "usr/share/icons/hicolor/256x256/apps/klip.png", "644"],
+  ["packaging/klip.svg", "usr/share/icons/hicolor/scalable/apps/klip.svg", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+  { source = "target/release/klip", dest = "/usr/bin/klip", mode = "755" },
+  { source = "packaging/klip.desktop", dest = "/usr/share/applications/klip.desktop", mode = "644" },
+  { source = "packaging/klip.png", dest = "/usr/share/icons/hicolor/256x256/apps/klip.png", mode = "644" },
+  { source = "packaging/klip.svg", dest = "/usr/share/icons/hicolor/scalable/apps/klip.svg", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+# Any FFmpeg works (Fedora's ffmpeg-free or RPM Fusion's ffmpeg).
+"/usr/bin/ffmpeg" = "*"

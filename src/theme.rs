@@ -115,6 +115,28 @@ pub fn install(ctx: &egui::Context, text_font: Option<&PathBuf>) {
     // Heavier icon weight for buttons, where the regular weight looks thin.
     egui_phosphor::add_font_bytes_as_family(&mut fonts, "icons_bold", egui_phosphor::Variant::Bold.font_bytes());
 
+    // System fallbacks for scripts Inter lacks (Sinhala, CJK, full-width
+    // punctuation…), found via fontconfig by character coverage.
+    let mut seen = std::collections::HashSet::new();
+    for (k, charset) in ["0dc3", "ff1a"].iter().enumerate() {
+        let Ok(out) = std::process::Command::new("fc-match").args(["-f", "%{file}|%{index}", &format!("sans:charset={charset}")]).output() else {
+            continue;
+        };
+        let spec = String::from_utf8_lossy(&out.stdout).to_string();
+        let (file, index) = spec.split_once('|').unwrap_or((spec.as_str(), "0"));
+        if file.is_empty() || !seen.insert(file.to_string()) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(file) {
+            let mut fd = FontData::from_owned(bytes);
+            // fontconfig packs the variable-font instance into the high bits.
+            fd.index = index.trim().parse::<u32>().unwrap_or(0) & 0xFFFF;
+            let name = format!("fallback{k}");
+            fonts.font_data.insert(name.clone(), Arc::new(fd));
+            fonts.families.entry(FontFamily::Proportional).or_default().push(name);
+        }
+    }
+
     // Every named family falls back to the regular stack (incl. icons).
     let fallback: Vec<String> = fonts.families[&FontFamily::Proportional].clone();
     let with = |first: &str| std::iter::once(first.to_string()).chain(fallback.iter().cloned()).collect::<Vec<_>>();
@@ -431,6 +453,117 @@ fn input_field(ui: &mut egui::Ui, text: &mut String, width: f32, margin: Margin,
     }
     ui.painter().set(bg, Shape::Vec(shapes));
     resp
+}
+
+// ------------------------------------------------------------- sliders
+
+/// How a number is shown and stepped in a [`value_box`].
+#[derive(Clone, Copy)]
+pub struct Num {
+    pub suffix: &'static str,
+    pub decimals: usize,
+    pub step: f32,
+}
+
+pub const fn num(suffix: &'static str, decimals: usize, step: f32) -> Num {
+    Num { suffix, decimals, step }
+}
+
+/// Slim slider: thin rail, light fill, small white pill knob.
+pub fn slider(ui: &mut egui::Ui, v: &mut f32, range: std::ops::RangeInclusive<f32>, width: f32) -> Response {
+    let (lo, hi) = (*range.start(), *range.end());
+    let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(width.max(40.0), 24.0), Sense::click_and_drag());
+    let pad = 5.0;
+    let rail = Rect::from_center_size(rect.center(), Vec2::new(rect.width() - pad * 2.0, 3.0));
+    if resp.is_pointer_button_down_on() || resp.dragged() || resp.clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let t = ((p.x - rail.left()) / rail.width()).clamp(0.0, 1.0);
+            let nv = lo + t * (hi - lo);
+            if (nv - *v).abs() > f32::EPSILON {
+                *v = nv;
+                resp.mark_changed();
+            }
+        }
+    }
+    let t = if hi > lo { ((*v - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 };
+    let x = rail.left() + t * rail.width();
+    let active = resp.hovered() || resp.dragged();
+    let h = ui.ctx().animate_bool_with_time(resp.id.with("h"), active, ANIM);
+    let p = ui.painter();
+    p.rect_filled(rail, CornerRadius::same(2), BG4);
+    p.rect_filled(Rect::from_min_max(rail.min, Pos2::new(x, rail.max.y)), CornerRadius::same(2), mix(Color32::from_gray(200), Color32::WHITE, h));
+    let knob = Rect::from_center_size(Pos2::new(x, rect.center().y), Vec2::new(6.0 + h, 14.0 + 2.0 * h));
+    p.add(Shadow { offset: [0, 1], blur: 3, spread: 0, color: Color32::from_black_alpha(120) }.as_shape(knob, CornerRadius::same(3)));
+    p.rect_filled(knob, CornerRadius::same(3), Color32::WHITE);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Editable number box with ▲▼ steppers: click to type, drag to scrub.
+pub fn value_box(ui: &mut egui::Ui, v: &mut f32, range: std::ops::RangeInclusive<f32>, n: Num) -> bool {
+    let mut changed = false;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().interact_size.y = 30.0;
+        let w = &mut ui.visuals_mut().widgets;
+        for st in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+            st.weak_bg_fill = BG0;
+            st.bg_fill = BG0;
+            st.corner_radius = CornerRadius::same(R_SM);
+            st.expansion = 0.0;
+        }
+        w.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+        w.hovered.bg_stroke = Stroke::new(1.0, BORDER_HI);
+        w.active.bg_stroke = Stroke::new(1.0, ACCENT.gamma_multiply(0.7));
+        let dv = egui::DragValue::new(v)
+            .range(range.clone())
+            .speed(n.step.max(0.01) * 0.5)
+            .suffix(n.suffix)
+            .min_decimals(n.decimals)
+            .max_decimals(n.decimals);
+        let dv = ui.add_sized(Vec2::new(64.0, 30.0), dv);
+        changed |= dv.changed();
+        let base = dv.id;
+
+        // Steppers.
+        let (r, _) = ui.allocate_exact_size(Vec2::new(22.0, 30.0), Sense::hover());
+        ui.painter().rect_filled(r, CornerRadius::same(R_SM), BG3);
+        ui.painter().rect_stroke(r, CornerRadius::same(R_SM), Stroke::new(1.0, BORDER), StrokeKind::Inside);
+        for k in 0..2 {
+            let half = Rect::from_min_size(Pos2::new(r.left(), r.top() + k as f32 * 15.0), Vec2::new(22.0, 15.0));
+            let resp = ui.interact(half, base.with(("step", k)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.hovered() {
+                ui.painter().rect_filled(half.shrink(1.0), CornerRadius::same(3), BG4);
+            }
+            let icon = if k == 0 { egui_phosphor::regular::CARET_UP } else { egui_phosphor::regular::CARET_DOWN };
+            ui.painter().text(half.center(), Align2::CENTER_CENTER, icon, FontId::new(12.0, bold_icons()), if resp.hovered() { TEXT } else { TEXT_DIM });
+            if resp.clicked() {
+                let d = if k == 0 { n.step } else { -n.step };
+                *v = (*v + d).clamp(*range.start(), *range.end());
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// Label · slider · value box. Double-click the label to reset to `default`.
+pub fn slider_row(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, n: Num) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let l = ui
+            .add_sized(Vec2::new(80.0, 28.0), egui::Label::new(egui::RichText::new(label).color(TEXT_DIM)).sense(Sense::click()))
+            .on_hover_text("Double-click to reset");
+        if l.double_clicked() && *v != default {
+            *v = default;
+            changed = true;
+        }
+        // Room for the value box (64) + steppers (22) + spacing.
+        let w = ui.available_width() - 64.0 - 22.0 - 4.0 - ui.spacing().item_spacing.x * 2.0 - 4.0;
+        changed |= slider(ui, v, range.clone(), w).changed();
+        changed |= value_box(ui, v, range, n);
+    });
+    changed
 }
 
 /// Play glyph, optically centred (centroid on `c`).
