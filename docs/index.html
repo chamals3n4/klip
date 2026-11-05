@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Klip · The CapCut alternative for Linux</title>
+  <meta name="description" content="Klip is a free CapCut alternative for Linux: a native video editor made for Reels, Shorts and TikToks.">
+  <meta name="theme-color" content="#0e0f12">
+  <meta property="og:title" content="Klip · The CapCut alternative for Linux">
+  <meta property="og:description" content="A free, native video editor for Linux, made for Reels, Shorts and TikToks.">
+  <meta property="og:image" content="screenshot.png">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='26' fill='%236f9be2'/%3E%3Cg stroke='%23fff' stroke-width='17' stroke-linecap='round'%3E%3Cline x1='33' y1='27' x2='33' y2='73'/%3E%3Cline x1='47' y1='50' x2='67' y2='29'/%3E%3Cline x1='53' y1='55' x2='68' y2='72' stroke-opacity='.62'/%3E%3C/g%3E%3C/svg%3E">
+  <script>
+    // Saved choice, else the system preference.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('klip-theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0e0f12;
+      --surface: #16171b;
+      --surface-2: #1c1d22;
+      --border: #26282e;
+      --border-hi: #35383f;
+      --text: #eef0f3;
+      --dim: #9ba0aa;
+      --faint: #656a73;
+      --accent: #78a4e8;
+      --accent-hi: #8fb4ee;
+      --warn: #f2c14e;
+      --warn-bg: rgba(242, 193, 78, 0.07);
+      --warn-line: rgba(242, 193, 78, 0.18);
+      --header-bg: rgba(14, 15, 18, 0.82);
+      --code: #d6dae1;
+      --shadow: 0 30px 80px -20px rgba(0, 0, 0, .7);
+      color-scheme: dark;
+    }
+    /* Light theme: chosen explicitly, or by the system when nothing's chosen. */
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f7f9;
+      --surface-2: #eceef2;
+      --border: #e4e6ea;
+      --border-hi: #d2d5db;
+      --text: #15171b;
+      --dim: #5b616b;
+      --faint: #8b9099;
+      --accent: #3f73c9;
+      --accent-hi: #3365b8;
+      --warn: #a87a04;
+      --warn-bg: rgba(201, 148, 6, 0.08);
+      --warn-line: rgba(201, 148, 6, 0.22);
+      --header-bg: rgba(255, 255, 255, 0.85);
+      --code: #2b2f36;
+      --shadow: 0 24px 60px -24px rgba(20, 30, 50, .25);
+      color-scheme: light;
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; scroll-padding-top: 80px; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.6 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hi); }
+    /* One column width for everything, so header, content and footer align. */
+    .wrap { max-width: 960px; margin: 0 auto; padding-left: 24px; padding-right: 24px; }
+    :root { --gap: 72px; --pad: 18px; }
+
+    /* ---- header ---- */
+    .top {
+      position: sticky; top: 0; z-index: 10;
+      background: var(--header-bg);
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      border-bottom: 1px solid transparent; transition: border-color .2s;
+    }
+    .top.scrolled { border-bottom-color: var(--border); }
+    .top .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .brand { display: flex; align-items: center; gap: 11px; color: var(--text); font-weight: 600; font-size: 22px; letter-spacing: -0.01em; }
+    .brand:hover { color: var(--text); }
+    .brand svg { width: 32px; height: 32px; display: block; }
+    nav { display: flex; align-items: center; gap: 24px; font-size: 14px; }
+    nav a { color: var(--dim); }
+    nav a:hover { color: var(--text); }
+    nav .gh { display: inline-flex; align-items: center; gap: 6px; color: var(--text); padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; }
+    nav .gh svg { width: 16px; height: 16px; fill: currentColor; }
+    nav .gh { transition: border-color .45s cubic-bezier(.22, .61, .36, 1), color .45s cubic-bezier(.22, .61, .36, 1); }
+    nav .gh:hover { border-color: var(--accent); color: var(--accent); }
+    nav .gh .stars {
+      margin-left: 2px; padding-left: 8px; border-left: 1px solid var(--border-hi);
+      color: var(--dim); font-variant-numeric: tabular-nums;
+    }
+    .theme {
+      width: 34px; height: 34px; display: grid; place-items: center; cursor: pointer;
+      background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--dim);
+    }
+    .theme:hover { color: var(--text); border-color: var(--border-hi); }
+    .theme { position: relative; overflow: hidden; transition: color .2s, border-color .2s; }
+    .theme span {
+      position: absolute; inset: 0; display: grid; place-items: center;
+      transition: opacity .35s ease, transform .45s cubic-bezier(.2, .8, .2, 1);
+    }
+    .theme svg { width: 16px; height: 16px; stroke-width: 2; }
+    .theme .moon { opacity: 0; transform: rotate(-90deg) scale(.6); }
+    :root[data-theme="light"] .theme .sun { opacity: 0; transform: rotate(90deg) scale(.6); }
+    :root[data-theme="light"] .theme .moon { opacity: 1; transform: none; }
+
+    /* Gentle colour fade while switching theme (fallback when View Transitions aren't available). */
+    :root.theme-fade, :root.theme-fade *, :root.theme-fade *::before, :root.theme-fade *::after {
+      transition: background-color .35s ease, color .35s ease, border-color .35s ease, box-shadow .35s ease, fill .35s ease !important;
+    }
+    ::view-transition-old(root), ::view-transition-new(root) { animation-duration: .35s; animation-timing-function: ease; }
+    @media (prefers-reduced-motion: reduce) {
+      .theme span { transition: none; }
+      ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+    }
+
+    /* ---- hero ---- */
+    .hero { padding-top: 64px; padding-bottom: 40px; }
+    h1 { font-size: clamp(34px, 6.4vw, 56px); line-height: 1.08; letter-spacing: -0.03em; font-weight: 600; margin: 0 0 20px; }
+    h1 .soft { color: var(--dim); }
+    .lead { color: var(--dim); font-size: 18px; max-width: 540px; margin: 0 0 32px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 18px; border-radius: 9px;
+      font-weight: 500; font-size: 15px; border: 1px solid var(--border-hi); color: var(--text); background: transparent;
+      transition: background-color .45s cubic-bezier(.22, .61, .36, 1), border-color .45s cubic-bezier(.22, .61, .36, 1),
+                  color .45s cubic-bezier(.22, .61, .36, 1), box-shadow .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    .btn:hover { color: var(--accent); border-color: var(--accent); }
+    .btn:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { background: var(--accent-hi); border-color: var(--accent-hi); color: #fff; }
+    .btn.primary:focus-visible { border-color: var(--accent-hi); }
+    /* Early-development banner under the nav. */
+    .banner {
+      background: var(--warn-bg); border-bottom: 1px solid var(--warn-line);
+      font-size: 13.5px; color: var(--dim); text-align: center;
+    }
+    .banner .wrap { padding-top: 9px; padding-bottom: 9px; }
+    .banner strong { color: var(--warn); font-weight: 600; }
+    .banner i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); margin-right: 8px; vertical-align: 1px; }
+
+    /* ---- screenshot ---- */
+    .shot { margin-top: 0; margin-bottom: var(--gap); }
+    .frame {
+      border-radius: 12px; border: 1px solid var(--border-hi); background: var(--surface); padding: 6px;
+      box-shadow: var(--shadow);
+    }
+    .frame img { display: block; width: 100%; height: auto; border-radius: 8px; }
+
+    /* ---- sections ---- */
+    section { padding-bottom: var(--gap); }
+    h2 { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.25; margin: 0 0 12px; }
+    .sub { color: var(--dim); margin: 0 0 24px; }
+    p { margin: 0 0 16px; }
+
+    .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .feature { padding: var(--pad); border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    .feature svg { width: 20px; height: 20px; stroke: var(--accent); fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; margin-bottom: 10px; display: block; }
+    .feature h3 { font-size: 15px; font-weight: 600; margin: 0 0 6px; }
+    .feature p { color: var(--dim); font-size: 14px; line-height: 1.55; margin: 0; }
+
+    /* ---- download ---- */
+    .downloads { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    .dl > *, .step > * { min-width: 0; }
+    .dl {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 20px; align-items: center;
+      padding: var(--pad); border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+    }
+    .dl .head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 2px; }
+    .dl h3 { font-size: 15.5px; font-weight: 600; margin: 0; }
+    .dl .ext { font: 12px "JetBrains Mono", ui-monospace, monospace; color: var(--faint); }
+    .dl p { color: var(--dim); font-size: 14px; margin: 0; }
+    .dl .code { grid-column: 1 / -1; }
+    .dl .btn { justify-content: center; height: 40px; width: 212px; }
+    .dl .btn svg { width: 16px; height: 16px; stroke-width: 2; }
+    .dl-meta {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px 24px; flex-wrap: wrap;
+      margin-top: 14px; font-size: 14px; color: var(--dim);
+    }
+    .dl-meta p { margin: 0; }
+    .dl-meta a { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); white-space: nowrap; transition: color .2s; }
+    .dl-meta a:hover { color: var(--accent); }
+    .dl-meta svg { width: 14px; height: 14px; stroke-width: 2; }
+
+    /* ---- steps ---- */
+    .steps { display: grid; gap: 12px; }
+    .step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 14px; padding: var(--pad); border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    .num {
+      width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+      font-size: 13px; font-weight: 600; color: #fff;
+      background: var(--accent);
+      border: 1px solid var(--accent);
+    }
+    .step h3 { font-size: 15.5px; font-weight: 600; margin: 3px 0 10px; }
+    .step p { color: var(--dim); font-size: 14.5px; margin: 0; }
+    .code + p { margin-top: 10px; }
+
+    .tabs { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); margin-bottom: 10px; }
+    .tabs button {
+      font: 500 13px Inter, sans-serif; color: var(--dim); background: none; border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer;
+      transition: background-color .2s, color .2s;
+    }
+    .tabs button:hover { color: var(--text); }
+    .tabs button[aria-selected="true"] { background: var(--accent); color: #fff; }
+
+    .code { position: relative; }
+    pre {
+      margin: 0; padding: 14px 76px 14px 16px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border);
+      overflow-x: auto; font: 13.5px/1.65 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--code);
+    }
+    .copy {
+      position: absolute; top: 8px; right: 8px; height: 28px; padding: 0 10px; border-radius: 7px; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg); border: 1px solid var(--border-hi); color: var(--dim); font: 500 12px Inter, sans-serif;
+      box-shadow: -14px 0 10px var(--bg);
+      transition: color .5s cubic-bezier(.22, .61, .36, 1), border-color .5s cubic-bezier(.22, .61, .36, 1),
+                  background-color .5s cubic-bezier(.22, .61, .36, 1), transform .15s ease;
+    }
+    .copy:hover { color: var(--text); border-color: var(--faint); }
+    .copy:active { transform: scale(.95); }
+    .copy .ic { position: relative; width: 14px; height: 14px; }
+    .copy .ic span { position: absolute; inset: 0; display: grid; place-items: center; transition: opacity .35s ease, transform .45s cubic-bezier(.34, 1.4, .64, 1); }
+    /* "Copy" and "Copied" share one cell and cross-fade, so the width never jumps. */
+    .copy .txt { display: grid; }
+    .copy .txt span { grid-area: 1 / 1; transition: opacity .35s ease, transform .35s cubic-bezier(.22, .61, .36, 1); }
+    .copy .txt .t2 { opacity: 0; transform: translateY(4px); }
+    .copy.done .txt .t1 { opacity: 0; transform: translateY(-4px); }
+    .copy.done .txt .t2 { opacity: 1; transform: none; }
+    .copy svg { width: 14px; height: 14px; stroke-width: 2; }
+    .copy .ok { opacity: 0; transform: scale(.5); }
+    .copy.done {
+      color: var(--accent);
+      border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+      background-color: color-mix(in srgb, var(--accent) 12%, var(--bg));
+    }
+    .copy.done .ok { opacity: 1; transform: none; }
+    .copy.done .cp { opacity: 0; transform: scale(.5); }
+    code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .88em; background: var(--surface-2); border: 1px solid var(--border); padding: 1px 6px; border-radius: 5px; color: var(--text); }
+    [hidden] { display: none !important; }
+
+    /* ---- shortcuts ---- */
+    .keys { display: grid; grid-template-columns: 1fr 1fr; column-gap: 32px; }
+    .key { display: flex; justify-content: space-between; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--border); font-size: 14.5px; color: var(--dim); }
+    kbd {
+      display: inline-block; min-width: 24px; padding: 2px 7px; border-radius: 6px; text-align: center;
+      background: var(--surface); border: 1px solid var(--border-hi); border-bottom-width: 2px;
+      font: 12px "JetBrains Mono", ui-monospace, monospace; color: var(--text);
+    }
+
+    /* ---- roadmap ---- */
+    .timeline { list-style: none; margin: 0; padding: 0; position: relative; }
+    .timeline li { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 16px; padding-bottom: 22px; }
+    .timeline li:last-child { padding-bottom: 0; }
+    /* connecting line */
+    .timeline li::before {
+      content: ""; position: absolute; left: 13.5px; top: 30px; bottom: 2px; width: 1px; background: var(--border-hi);
+    }
+    .timeline li:last-child::before { display: none; }
+    .timeline li.done::before { background: var(--accent); opacity: .55; }
+    .timeline .dot {
+      width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+      border: 1.5px solid var(--border-hi); background: var(--bg); color: #fff;
+    }
+    .timeline .dot svg { width: 14px; height: 14px; stroke-width: 3; }
+    .timeline .done .dot { background: var(--accent); border-color: var(--accent); }
+    .timeline .next .dot { border-color: var(--accent); box-shadow: inset 0 0 0 5px var(--bg), inset 0 0 0 14px var(--accent); }
+    .timeline .title { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15.5px; line-height: 28px; }
+    .timeline p { color: var(--dim); font-size: 14.5px; margin: 0; }
+    .timeline .done .title { color: var(--text); }
+    .timeline .tag {
+      font: 500 11.5px Inter, sans-serif; line-height: 1; padding: 4px 8px; border-radius: 999px;
+      color: var(--dim); border: 1px solid var(--border-hi);
+    }
+    .timeline .next .tag { color: var(--accent); border-color: var(--accent); }
+
+    /* ---- footer ---- */
+    footer { border-top: 1px solid var(--border); }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; align-items: center; padding-top: 28px; padding-bottom: 36px; font-size: 14px; color: var(--faint); }
+    footer .links { display: flex; gap: 20px; }
+    footer .links a { color: var(--dim); }
+    footer .links a:hover { color: var(--text); }
+    footer .brand { font-size: 15px; gap: 8px; line-height: 1; }
+    footer .brand svg { width: 20px; height: 20px; }
+    footer .brand small {
+      color: var(--faint); font-weight: 500; font-size: 12px; line-height: 1;
+      padding: 3px 7px; border: 1px solid var(--border); border-radius: 999px; margin-left: 2px;
+    }
+
+    @media (max-width: 820px) {
+      .features { grid-template-columns: 1fr 1fr; }
+      .dl { grid-template-columns: minmax(0, 1fr); }
+      .dl .btn { width: 100%; }
+      .dl-meta { flex-direction: column; align-items: flex-start; }
+    }
+    @media (max-width: 640px) {
+      .wrap { padding-left: 16px; padding-right: 16px; }
+      nav { gap: 16px; }
+      nav .hide-sm { display: none; }
+      :root { --gap: 56px; --pad: 16px; }
+      br.lg { display: none; }
+      .hero { padding-top: 40px; padding-bottom: 32px; }
+      .lead { font-size: 16.5px; }
+      .frame { padding: 4px; border-radius: 10px; }
+      h2 { font-size: 24px; }
+      .features { grid-template-columns: 1fr; }
+      .step { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+      .keys { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="top" id="top">
+    <div class="wrap">
+      <a class="brand" href="./" aria-label="Klip home">
+        <svg viewBox="0 0 100 100" aria-hidden="true">
+          <rect width="100" height="100" rx="26" fill="#6f9be2"/>
+          <g stroke="#fff" stroke-width="17" stroke-linecap="round">
+            <line x1="33" y1="27" x2="33" y2="73"/>
+            <line x1="47" y1="50" x2="67" y2="29"/>
+            <line x1="53" y1="55" x2="68" y2="72" stroke-opacity=".62"/>
+          </g>
+        </svg>
+        klip
+      </a>
+      <nav>
+        <a class="hide-sm" href="#features">Features</a>
+        <a class="hide-sm" href="#download">Download</a>
+        <a class="hide-sm" href="#roadmap">Roadmap</a>
+        <button class="theme" type="button" aria-label="Toggle light and dark mode" title="Toggle theme">
+          <span class="sun"><i data-lucide="sun"></i></span>
+          <span class="moon"><i data-lucide="moon"></i></span>
+        </button>
+        <a class="gh" href="https://github.com/chamals3n4/klip">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          Star on GitHub<span class="stars" hidden></span>
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="banner" role="note">
+    <div class="wrap"><i></i><strong>Early development.</strong> Things may break or change between versions.</div>
+  </div>
+
+  <main>
+    <div class="wrap hero">
+      <h1>The CapCut alternative <br class="lg"><span class="soft">Linux never had.</span></h1>
+      <p class="lead">Klip is a free, native editor for Reels, Shorts and TikToks. Cut clips, add text, captions and music, and export a ready-to-post MP4.</p>
+      <div class="actions">
+        <a class="btn primary" href="#download">Download</a>
+        <a class="btn" href="#install">Build from source</a>
+      </div>
+    </div>
+
+    <div class="wrap shot">
+      <div class="frame">
+        <img src="screenshot.png" alt="The Klip editor with an interview clip on a 9:16 canvas, a caption, and the timeline below" width="1920" height="996">
+      </div>
+    </div>
+
+    <section id="features" class="wrap">
+      <h2>Everything a short video needs</h2>
+      <p class="sub">The tools you reach for every day, without the clutter.</p>
+      <div class="features">
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M9 6v12M15 6v12"/></svg>
+          <h3>Timeline editing</h3><p>Trim, split, reorder and snap clips. Undo works for everything.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M3 9v6M21 9v6"/></svg>
+          <h3>Any format</h3><p>9:16, 4:5, 1:1 or 16:9. Move, scale and rotate clips freely.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><path d="M5 6h14M12 6v13M9 19h6"/></svg>
+          <h3>Text and captions</h3><p>Styled titles, or import an <code>.srt</code> and style all captions at once.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
+          <h3>Music</h3><p>Add tracks with waveforms, trim them and set the volume.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4v16"/></svg>
+          <h3>Transitions and filters</h3><p>Fades, slides, wipes and zooms. Color looks and adjust sliders.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+          <h3>Export</h3><p>H.264 MP4 at 1080p or 720p, exactly as you saw it in the preview.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="download" class="wrap">
+      <h2>Download</h2>
+      <p class="sub">Get the latest release<span class="latest"></span> for your distro. Klip uses FFmpeg, which the .deb and .rpm install for you.</p>
+      <div class="downloads">
+        <div class="dl">
+          <div>
+            <div class="head"><h3>AppImage</h3><span class="ext">.AppImage</span></div>
+            <p>Any distro. No install needed: make it executable and run it.</p>
+          </div>
+          <a class="btn primary" href="https://github.com/chamals3n4/klip/releases/latest/download/klip-x86_64.AppImage"><i data-lucide="download"></i>Download AppImage</a>
+          <div class="code"><pre>chmod +x klip-x86_64.AppImage
+./klip-x86_64.AppImage</pre></div>
+        </div>
+        <div class="dl">
+          <div>
+            <div class="head"><h3>Debian / Ubuntu</h3><span class="ext">.deb</span></div>
+            <p>Ubuntu, Debian, Linux Mint, Pop!_OS and other Debian-based distros.</p>
+          </div>
+          <a class="btn" href="https://github.com/chamals3n4/klip/releases/latest/download/klip_amd64.deb"><i data-lucide="download"></i>Download .deb</a>
+          <div class="code"><pre>sudo apt install ./klip_amd64.deb</pre></div>
+        </div>
+        <div class="dl">
+          <div>
+            <div class="head"><h3>Fedora / openSUSE</h3><span class="ext">.rpm</span></div>
+            <p>Fedora, openSUSE and other RPM-based distros.</p>
+          </div>
+          <a class="btn" href="https://github.com/chamals3n4/klip/releases/latest/download/klip.x86_64.rpm"><i data-lucide="download"></i>Download .rpm</a>
+          <div class="code"><pre>sudo dnf install ./klip.x86_64.rpm</pre></div>
+        </div>
+      </div>
+      <div class="dl-meta">
+        <p>For 64-bit Linux. The AppImage needs FFmpeg from your package manager.</p>
+        <a href="https://github.com/chamals3n4/klip/releases">All releases and checksums <i data-lucide="arrow-up-right"></i></a>
+      </div>
+    </section>
+
+    <section id="install" class="wrap">
+      <h2>Build from source</h2>
+      <p class="sub">Prefer to build it yourself, or on a distro without a package? You need FFmpeg and Rust.</p>
+      <div class="steps">
+        <div class="step">
+          <div class="num">1</div>
+          <div>
+            <h3>Install FFmpeg</h3>
+            <div class="tabs" role="tablist">
+              <button role="tab" aria-selected="true" data-tab="fedora">Fedora</button>
+              <button role="tab" aria-selected="false" data-tab="ubuntu">Ubuntu / Debian</button>
+            </div>
+            <div class="code" data-panel="fedora"><pre>sudo dnf install ffmpeg</pre></div>
+            <div class="code" data-panel="ubuntu" hidden><pre>sudo apt install ffmpeg</pre></div>
+            <p>On Fedora, enable <a href="https://rpmfusion.org/Configuration">RPM Fusion</a> first for H.264 export.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="num">2</div>
+          <div>
+            <h3>Install Rust</h3>
+            <p>If you don't have it yet, get it from <a href="https://rustup.rs">rustup.rs</a>.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="num">3</div>
+          <div>
+            <h3>Build and run</h3>
+            <div class="code"><pre>git clone https://github.com/chamals3n4/klip.git
+cd klip
+cargo run --release</pre></div>
+            <p>Use <code>--release</code>. The debug build is too slow for smooth 1080p preview.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <section id="shortcuts" class="wrap">
+      <h2>Keep your hands on the keyboard</h2>
+      <p class="sub">The ones you'll use most.</p>
+      <div class="keys">
+        <div class="key">Play / pause <kbd>Space</kbd></div>
+        <div class="key">Undo <span><kbd>Ctrl</kbd> <kbd>Z</kbd></span></div>
+        <div class="key">Split at playhead <kbd>S</kbd></div>
+        <div class="key">Duplicate <span><kbd>Ctrl</kbd> <kbd>D</kbd></span></div>
+        <div class="key">Delete selected <kbd>Del</kbd></div>
+        <div class="key">Export <span><kbd>Ctrl</kbd> <kbd>E</kbd></span></div>
+        <div class="key">Step one frame <span><kbd>←</kbd> <kbd>→</kbd></span></div>
+        <div class="key">Full-screen preview <kbd>F</kbd></div>
+      </div>
+    </section>
+
+    <section id="roadmap" class="wrap">
+      <h2>What's next</h2>
+      <p class="sub">Klip is young. Here's what's done and what's coming.</p>
+      <ol class="timeline">
+        <li class="done">
+          <span class="dot"><i data-lucide="check"></i></span>
+          <div><div class="title">Editing basics<span class="tag">v0.1</span></div><p>Timeline, text, captions, music and MP4 export.</p></div>
+        </li>
+        <li class="done">
+          <span class="dot"><i data-lucide="check"></i></span>
+          <div><div class="title">Transitions and looks<span class="tag">v0.1</span></div><p>Transitions, fades, filters and free move / scale / rotate.</p></div>
+        </li>
+        <li class="next">
+          <span class="dot"></span>
+          <div><div class="title">Project manager<span class="tag">Next</span></div><p>Browse, open and organise your projects from a home screen.</p></div>
+        </li>
+        <li>
+          <span class="dot"></span>
+          <div><div class="title">Audio fades</div><p>Fade music and clip sound in and out.</p></div>
+        </li>
+        <li>
+          <span class="dot"></span>
+          <div><div class="title">Auto captions</div><p>Generate captions from speech, on your own machine with Whisper.</p></div>
+        </li>
+        <li>
+          <span class="dot"></span>
+          <div><div class="title">Speed control</div><p>Slow motion and speed-ups for any clip.</p></div>
+        </li>
+        <li>
+          <span class="dot"></span>
+          <div><div class="title">Templates</div><p>Ready-made layouts for common Reel formats.</p></div>
+        </li>
+      </ol>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <a class="brand" href="#top">
+        <svg viewBox="0 0 100 100" aria-hidden="true">
+          <rect width="100" height="100" rx="26" fill="#6f9be2"/>
+          <g stroke="#fff" stroke-width="17" stroke-linecap="round">
+            <line x1="33" y1="27" x2="33" y2="73"/>
+            <line x1="47" y1="50" x2="67" y2="29"/>
+            <line x1="53" y1="55" x2="68" y2="72" stroke-opacity=".62"/>
+          </g>
+        </svg>
+        klip <small>v0.1.0</small>
+      </a>
+      <div class="links">
+        <a href="https://github.com/chamals3n4/klip">GitHub</a>
+        <a href="https://github.com/chamals3n4/klip/issues">Report an issue</a>
+        <a href="https://github.com/chamals3n4/klip/blob/main/LICENSE">MIT License</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+  <script>
+    // Header border once the page scrolls.
+    var header = document.getElementById('top');
+    function onScroll() { header.classList.toggle('scrolled', window.scrollY > 8); }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+
+    // Light / dark toggle.
+    var reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var root = document.documentElement;
+    document.querySelector('.theme').addEventListener('click', function () {
+      var next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      function apply() { root.setAttribute('data-theme', next); }
+      try { localStorage.setItem('klip-theme', next); } catch (e) {}
+      if (reduceMotion) return apply();
+      if (document.startViewTransition) {
+        document.startViewTransition(apply); // smooth cross-fade
+      } else {
+        root.classList.add('theme-fade');
+        apply();
+        setTimeout(function () { root.classList.remove('theme-fade'); }, 400);
+      }
+    });
+
+    // Eased scrolling for in-page links, landing just below the sticky header.
+    function easeInOut(t) { return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+    document.querySelectorAll('a[href^="#"]').forEach(function (a) {
+      a.addEventListener('click', function (e) {
+        var id = a.getAttribute('href');
+        var target = id === '#top' ? document.body : document.querySelector(id);
+        if (!target) return;
+        e.preventDefault();
+        var start = window.scrollY;
+        var end = id === '#top' ? 0 : target.getBoundingClientRect().top + start - 76;
+        var dist = end - start;
+        if (reduceMotion || Math.abs(dist) < 2) { window.scrollTo(0, end); return; }
+        var dur = Math.min(900, Math.max(450, Math.abs(dist) * 0.35));
+        var t0 = null;
+        function step(ts) {
+          if (t0 === null) t0 = ts;
+          var t = Math.min(1, (ts - t0) / dur);
+          window.scrollTo(0, start + dist * easeInOut(t));
+          if (t < 1) requestAnimationFrame(step);
+        }
+        requestAnimationFrame(step);
+        history.replaceState(null, '', id === '#top' ? location.pathname : id);
+      });
+    });
+
+    // Fedora / Ubuntu tabs.
+    document.querySelectorAll('.tabs').forEach(function (tabs) {
+      var step = tabs.parentNode;
+      tabs.querySelectorAll('button').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          tabs.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-selected', b === btn); });
+          step.querySelectorAll('[data-panel]').forEach(function (p) { p.hidden = p.dataset.panel !== btn.dataset.tab; });
+        });
+      });
+    });
+
+    // Copy buttons: copy icon → check + "Copied", then back.
+    function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+      return new Promise(function (ok, fail) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy') ? ok() : fail(); } catch (e) { fail(e); }
+        document.body.removeChild(ta);
+      });
+    }
+    document.querySelectorAll('.code').forEach(function (block) {
+      var pre = block.querySelector('pre');
+      var b = document.createElement('button');
+      b.className = 'copy';
+      b.type = 'button';
+      b.setAttribute('aria-label', 'Copy command');
+      b.innerHTML = '<span class="ic"><span class="cp"><i data-lucide="copy"></i></span><span class="ok"><i data-lucide="check"></i></span></span><span class="txt"><span class="t1">Copy</span><span class="t2">Copied</span></span>';
+      var timer;
+      b.addEventListener('click', function () {
+        copyText(pre.textContent.trim()).then(function () {
+          b.classList.add('done');
+          clearTimeout(timer);
+          timer = setTimeout(function () { b.classList.remove('done'); }, 1800);
+        });
+      });
+      block.appendChild(b);
+    });
+
+    // Show the latest release version next to "latest release" (best effort).
+    fetch('https://api.github.com/repos/chamals3n4/klip/releases?per_page=1')
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (list) {
+        if (list && list[0] && list[0].tag_name) {
+          document.querySelector('.latest').textContent = ' (' + list[0].tag_name + ')';
+        }
+      })
+      .catch(function () {});
+
+    // GitHub star count (best effort).
+    fetch('https://api.github.com/repos/chamals3n4/klip')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (repo) {
+        if (!repo || typeof repo.stargazers_count !== 'number' || repo.stargazers_count < 1) return;
+        var n = repo.stargazers_count;
+        var el = document.querySelector('.gh .stars');
+        el.textContent = n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
+        el.hidden = false;
+      })
+      .catch(function () {});
+
+    // Render Lucide icons (incl. the copy buttons created above).
+    if (window.lucide) lucide.createIcons();
+  </script>
+</body>
+</html>
