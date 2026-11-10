@@ -7,6 +7,7 @@ mod export;
 mod fx;
 mod media;
 mod model;
+mod store;
 mod theme;
 mod ui;
 

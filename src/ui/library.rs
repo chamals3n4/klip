@@ -120,8 +120,24 @@ fn media_tile(app: &mut KlipApp, ui: &mut egui::Ui, m: &crate::model::MediaInfo,
     let sel_t = anim(ui, ("tile_s", id), app.lib_selected == Some(id));
     let sel = app.lib_selected == Some(id);
     let used = app.project.video.iter().any(|c| c.media == id);
+    let missing = !m.path.exists();
     paint_thumb(ui, app, id, thumb_r, m.aspect());
     let p = ui.painter();
+    if missing {
+        // File moved or deleted: dim the tile and offer to locate it.
+        if app.assets.get(&id).is_none_or(|a| a.thumb.is_none()) {
+            p.rect_filled(thumb_r, CornerRadius::same(R_MD), BG2);
+        }
+        p.rect_filled(thumb_r, CornerRadius::same(R_MD), Color32::from_black_alpha(if hov_b { 150 } else { 120 }));
+        p.text(thumb_r.center() - Vec2::new(0.0, 10.0), Align2::CENTER_CENTER, ph::LINK_BREAK, FontId::proportional(20.0), DANGER);
+        p.text(
+            thumb_r.center() + Vec2::new(0.0, 14.0),
+            Align2::CENTER_CENTER,
+            if hov_b { "Click to locate" } else { "Missing" },
+            FontId::new(12.0, medium_family()),
+            TEXT,
+        );
+    }
     // Duration / kind badge.
     let badge = if m.kind == MediaKind::Image { ph::IMAGE.to_string() } else { short_dur(m.duration) };
     let g = p.layout_no_wrap(badge, FontId::proportional(11.0), Color32::WHITE);
@@ -183,11 +199,19 @@ fn media_tile(app: &mut KlipApp, ui: &mut egui::Ui, m: &crate::model::MediaInfo,
     }
     if resp.clicked() {
         app.lib_selected = Some(id);
+        if missing {
+            app.dialog_relink(id);
+        }
     }
-    if resp.double_clicked() {
+    if resp.double_clicked() && !missing {
         app.add_to_main(id, None);
     }
-    resp.on_hover_text(format!("{}\n{}×{}", m.name, m.width, m.height)).context_menu(|ui| {
+    let tip = if missing { format!("{}\nNot found at {}", m.name, m.path.display()) } else { format!("{}\n{}×{}", m.name, m.width, m.height) };
+    resp.on_hover_text(tip).context_menu(|ui| {
+        if missing && ui.button(format!("{} Locate file…", ph::LINK)).clicked() {
+            app.dialog_relink(id);
+            ui.close();
+        }
         if ui.button(format!("{} Add to timeline", ph::PLUS)).clicked() {
             app.add_to_main(id, None);
             ui.close();

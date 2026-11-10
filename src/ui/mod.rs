@@ -6,6 +6,7 @@
 
 mod dialogs;
 pub mod export_dialog;
+mod home;
 
 /// Most zoomed-in timeline scale (pixels per second).
 pub const MAX_PPS: f32 = 800.0;
@@ -14,7 +15,7 @@ mod library;
 mod preview;
 mod timeline;
 
-use crate::app::{KlipApp, ToastKind};
+use crate::app::{KlipApp, Screen, ToastKind};
 use crate::model::Aspect;
 use crate::theme::*;
 use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Vec2};
@@ -22,6 +23,13 @@ use egui_phosphor::regular as ph;
 
 pub fn draw(app: &mut KlipApp, ui: &mut egui::Ui) {
     let gap = 6;
+    if app.screen == Screen::Home {
+        home::home(app, ui);
+        dialogs::dialogs(app, ui.ctx());
+        os_drop_overlay(ui.ctx(), "Drop to start a new project");
+        toasts(app, ui.ctx());
+        return;
+    }
     if app.fullscreen {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(Color32::BLACK))
@@ -65,8 +73,7 @@ pub fn draw(app: &mut KlipApp, ui: &mut egui::Ui) {
         .show(ui, |ui| card(ui, Margin::same(0), |ui| preview::preview(app, ui)));
 
     export_dialog::export_dialog(app, ui.ctx());
-    dialogs::dialogs(app, ui.ctx());
-    os_drop_overlay(ui.ctx());
+    os_drop_overlay(ui.ctx(), "Drop to import");
     toasts(app, ui.ctx());
 }
 
@@ -85,6 +92,11 @@ pub fn card<R>(ui: &mut egui::Ui, margin: Margin, add: impl FnOnce(&mut egui::Ui
 
 fn top_bar(app: &mut KlipApp, ui: &mut egui::Ui) {
     ui.horizontal_centered(|ui| {
+        if icon_button(ui, ph::ARROW_LEFT, "Back to projects", true).clicked() {
+            app.go_home();
+            return;
+        }
+        ui.add_space(4.0);
         let (r, _) = ui.allocate_exact_size(Vec2::new(28.0, 28.0), egui::Sense::hover());
         paint_logo(ui.painter(), r);
         ui.add_space(2.0);
@@ -106,23 +118,14 @@ fn top_bar(app: &mut KlipApp, ui: &mut egui::Ui) {
         name.on_hover_text("Click to rename project");
         let t = anim(ui, "rename_icon", hovered || focused);
         ui.label(RichText::new(ph::PENCIL_SIMPLE).size(14.0).color(mix(TEXT_FAINT, ACCENT, t)));
-        if app.is_dirty() {
-            let (r, resp) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
-            ui.painter().circle_filled(r.center(), 3.5, TEXT_FAINT);
-            resp.on_hover_text("Unsaved changes");
-        }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             if primary_button(ui, format!("{}  Export", ph::UPLOAD_SIMPLE)).on_hover_text("Ctrl+E").clicked() {
                 app.export.open = true;
             }
-            if secondary_button(ui, format!("{}  Save", ph::FLOPPY_DISK_BACK)).on_hover_text("Save project (Ctrl+S)").clicked() {
-                app.save();
-            }
-            if secondary_button(ui, format!("{}  Open", ph::FOLDER_SIMPLE)).on_hover_text("Open project (Ctrl+O)").clicked() {
-                app.dialog_open();
-            }
+            ui.add_space(4.0);
+            save_status(app, ui);
             ui.add_space(8.0);
             ui.add(egui::Separator::default().vertical().spacing(4.0));
             ui.add_space(4.0);
@@ -135,7 +138,18 @@ fn top_bar(app: &mut KlipApp, ui: &mut egui::Ui) {
     });
 }
 
-fn os_drop_overlay(ctx: &egui::Context) {
+/// Quiet "Saved" / "Saving…" note; projects save on their own.
+fn save_status(app: &KlipApp, ui: &mut egui::Ui) {
+    let saving = app.is_dirty();
+    let (icon, text) = if saving { (ph::CLOUD_ARROW_UP, "Saving…") } else { (ph::CLOUD_CHECK, "Saved") };
+    let t = anim(ui, "save_status", saving);
+    let col = mix(TEXT_FAINT, TEXT_DIM, t);
+    ui.label(RichText::new(text).size(13.0).color(col))
+        .on_hover_text("Changes save automatically (Ctrl+S to save now)");
+    ui.label(RichText::new(icon).size(16.0).color(col));
+}
+
+fn os_drop_overlay(ctx: &egui::Context, label: &str) {
     let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
     if !hovering {
         return;
@@ -149,7 +163,7 @@ fn os_drop_overlay(ctx: &egui::Context) {
     p.text(
         r.center() + Vec2::new(0.0, 30.0),
         egui::Align2::CENTER_CENTER,
-        "Drop to import",
+        label,
         egui::FontId::new(22.0, heading_family()),
         TEXT,
     );
