@@ -7,6 +7,9 @@ mod export;
 mod fx;
 mod media;
 mod model;
+// Wired into the app with the home screen; only tests use it for now.
+#[allow(dead_code)]
+mod store;
 mod theme;
 mod ui;
 

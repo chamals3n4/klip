@@ -572,8 +572,7 @@ impl KlipApp {
         if path.extension().is_none() {
             path.set_extension("klip");
         }
-        let json = serde_json::json!({ "app": "klip", "version": 1, "project": self.project });
-        match std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()) {
+        match crate::store::write_project(&path, &self.project, None) {
             Ok(()) => {
                 self.saved = self.project.clone();
                 self.project_path = Some(path);
@@ -650,11 +649,7 @@ impl KlipApp {
         }
         self.autosave_due = now + 15.0;
         let path = autosave_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let json = serde_json::json!({ "app": "klip", "version": 1, "project": self.project, "path": self.project_path });
-        if std::fs::write(&path, serde_json::to_string(&json).unwrap_or_default()).is_ok() {
+        if crate::store::write_project(&path, &self.project, self.project_path.as_deref()).is_ok() {
             self.autosaved = Some(self.project.clone());
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(16));
@@ -1338,20 +1333,12 @@ impl eframe::App for KlipApp {
 
 /// `~/.local/share/klip/autosave.klip` (or `$XDG_DATA_HOME/klip/…`).
 pub fn autosave_path() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("klip").join("autosave.klip")
+    crate::store::data_dir().join("autosave.klip")
 }
 
 /// Read a `.klip` file: (project, the path it was saved from, if recorded).
 pub fn load_project_file(path: &Path) -> Result<(Project, Option<PathBuf>), String> {
-    let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| e.to_string())?;
-    let p: Project = serde_json::from_value(v["project"].clone()).map_err(|e| e.to_string())?;
-    let origin = v["path"].as_str().map(PathBuf::from);
-    Ok((p, origin))
+    crate::store::read_project(path)
 }
 
 pub fn to_image(f: &Frame) -> ColorImage {
