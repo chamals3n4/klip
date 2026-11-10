@@ -432,7 +432,8 @@ fn input_field(ui: &mut egui::Ui, text: &mut String, width: f32, margin: Margin,
     let resp = ui.add(
         egui::TextEdit::singleline(text)
             .frame(egui::Frame::NONE.inner_margin(margin))
-            .desired_width(width - margin.sum().x)
+            // The frame's margin is inside this width already.
+            .desired_width(width)
             .text_color(TEXT),
     );
     let ease = egui::emath::easing::cubic_out;

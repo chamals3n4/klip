@@ -4,7 +4,7 @@
 //! ~/.local/share/klip/projects/
 //!   <id>/project.klip   the full project (JSON)
 //!   <id>/meta.json      name, dates, duration… (all the home screen reads)
-//!   <id>/thumb.png      cover image for the project grid
+//!   <id>/thumb.jpg      cover image for the project grid
 //!   .trash/<id>/        deleted projects, purged after 30 days
 //! ```
 //!
@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const FORMAT_VERSION: u32 = 2;
 const PROJECT_FILE: &str = "project.klip";
 const META_FILE: &str = "meta.json";
-const THUMB_FILE: &str = "thumb.png";
+const THUMB_FILE: &str = "thumb.jpg";
 const TRASH_DIR: &str = ".trash";
 /// How long deleted projects stay recoverable.
 pub const TRASH_TTL: u64 = 30 * 24 * 60 * 60;
@@ -60,15 +60,11 @@ pub struct Store {
 }
 
 impl Store {
-    /// The store in the user's data folder.
-    pub fn open_default() -> Self {
-        Self::at(data_dir().join("projects"))
-    }
-
     pub fn at(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    #[cfg(test)]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -79,6 +75,11 @@ impl Store {
 
     pub fn thumb_path(&self, id: &str) -> PathBuf {
         self.dir(id).join(THUMB_FILE)
+    }
+
+    /// Where a listed project's cover lives (it moves with the project to the trash).
+    pub fn cover_path(&self, m: &Meta) -> PathBuf {
+        if m.deleted.is_some() { self.trash().join(&m.id).join(THUMB_FILE) } else { self.thumb_path(&m.id) }
     }
 
     fn trash(&self) -> PathBuf {
@@ -186,6 +187,11 @@ impl Store {
         Ok(meta)
     }
 
+    /// Permanently remove one project from the trash.
+    pub fn delete_forever(&self, id: &str) -> io::Result<()> {
+        std::fs::remove_dir_all(self.trash().join(id))
+    }
+
     /// Permanently remove trashed projects older than `ttl` seconds.
     pub fn purge_trash(&self, ttl: u64) -> usize {
         let cutoff = now().saturating_sub(ttl);
@@ -204,8 +210,13 @@ impl Store {
         if p.name.trim().is_empty() {
             p.name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         }
+        self.import_project(p).map_err(|e| e.to_string())
+    }
+
+    /// Add a project under a name that isn't taken yet.
+    pub fn import_project(&self, mut p: Project) -> io::Result<Meta> {
         p.name = self.unique_name(&p.name);
-        self.insert(&p).map_err(|e| e.to_string())
+        self.insert(&p)
     }
 
     /// `base`, or `base 2`, `base 3`… whichever isn't taken yet.
@@ -295,12 +306,68 @@ fn scan(dir: &Path) -> Vec<Meta> {
 }
 
 /// `$XDG_DATA_HOME/klip`, usually `~/.local/share/klip`.
+/// `KLIP_DATA_DIR` overrides it (used by tests and automation).
 pub fn data_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("KLIP_DATA_DIR") {
+        return PathBuf::from(d);
+    }
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .unwrap_or_else(std::env::temp_dir)
         .join("klip")
+}
+
+// -------------------------------------------------------------- thumbnails
+
+/// Pixel size of a project's cover image (cropped to the canvas ratio).
+pub fn thumb_size(aspect: Aspect) -> (usize, usize) {
+    let w = 288.0;
+    let h = (w / crate::app::aspect_of(aspect) / 2.0).round() * 2.0;
+    (w as usize, h as usize)
+}
+
+/// Render the cover image from the first clip of the main track. Removes a
+/// stale cover when the project has no video.
+pub fn write_thumb(p: &Project, out: &Path) -> bool {
+    let Some(clip) = p.video.first() else {
+        let _ = std::fs::remove_file(out);
+        return false;
+    };
+    let Some(m) = p.media.iter().find(|m| m.id == clip.media) else { return false };
+    if !m.path.exists() {
+        return false;
+    }
+    let (w, h) = thumb_size(p.aspect);
+    let mut cmd = crate::media::ffmpeg();
+    if m.kind == crate::model::MediaKind::Video {
+        // A moment in, so fades from black don't make an empty cover.
+        let t = clip.src_in + (clip.src_out - clip.src_in).clamp(0.0, 3.0) * 0.3;
+        cmd.args(["-ss", &format!("{t:.3}")]);
+    }
+    let mut vf = format!("scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}");
+    let grade = crate::fx::grade(clip.filter, clip.filter_amount, &clip.adjust).ffmpeg();
+    if !grade.is_empty() {
+        vf = format!("{vf},{grade}");
+    }
+    let tmp = out.with_extension("tmp.jpg");
+    let ok = cmd
+        .arg("-i")
+        .arg(&m.path)
+        .args(["-frames:v", "1", "-vf", &vf, "-q:v", "4", "-y"])
+        .arg(&tmp)
+        .status()
+        .is_ok_and(|s| s.success());
+    ok && std::fs::rename(&tmp, out).is_ok()
+}
+
+/// Decode a cover image written by [`write_thumb`].
+pub fn read_thumb(path: &Path, aspect: Aspect) -> Option<crate::media::Frame> {
+    if !path.exists() {
+        return None;
+    }
+    let (w, h) = thumb_size(aspect);
+    crate::media::grab_frame(path, 0.0, w, h)
 }
 
 pub fn now() -> u64 {

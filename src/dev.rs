@@ -9,10 +9,17 @@
 //! - `KLIP_DEMO_FULLSCREEN=1` open the full-screen preview
 //! - `KLIP_DEMO_TRANSITION=slideleft`, `KLIP_DEMO_FILTER=film`,
 //!   `KLIP_DEMO_TRANSFORM=scale,x,y,deg` pre-apply effects
+//! - `KLIP_DEMO_NAME`, `KLIP_DEMO_ASPECT=9:16` name / ratio of the project
+//!   created from media on the command line
+//! - `KLIP_DEMO_HOME=1`        go back to the home screen once the demo is set up
+//! - `KLIP_DEMO_DIALOG=new|rename`, `KLIP_DEMO_MENU=1`, `KLIP_DEMO_TRASH=1`,
+//!   `KLIP_DEMO_DELETE=<name>`, `KLIP_DEMO_OPEN=<name>` drive the home screen
+//! - `KLIP_DATA_DIR=dir`       where projects are stored (default for
+//!   automated runs: a throwaway folder in /tmp)
 //! - `KLIP_MUTE=1`             no preview audio
 //! - `KLIP_SCREENSHOT=out.png`  save a screenshot after `KLIP_SCREENSHOT_DELAY` s, then quit
 
-use crate::app::{KlipApp, LeftTab, Selection};
+use crate::app::{KlipApp, LeftTab, NewProject, Screen, Selection};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -24,10 +31,11 @@ pub struct Dev {
     delay: f64,
     requested: bool,
     applied: bool,
+    home_applied: bool,
 }
 
 impl Dev {
-    /// Running under automation: no autosave, no prompts.
+    /// Running under automation (uses a throwaway project store).
     pub fn active(&self) -> bool {
         self.demo || self.shot.is_some()
     }
@@ -39,6 +47,7 @@ impl Dev {
             delay: std::env::var("KLIP_SCREENSHOT_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0),
             requested: false,
             applied: false,
+            home_applied: false,
         }
     }
 }
@@ -118,6 +127,13 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
             _ => LeftTab::Media,
         };
     }
+    if app.dev.applied && app.screen == Screen::Editor && std::env::var_os("KLIP_DEMO_HOME").is_some() && !app.dev.home_applied {
+        app.go_home();
+    }
+    if app.dev.active() && app.screen == Screen::Home && !app.dev.home_applied {
+        app.dev.home_applied = true;
+        home_hooks(app, ctx);
+    }
     let Some(path) = app.dev.shot.clone() else { return };
     ctx.request_repaint_after(std::time::Duration::from_millis(100));
     if !app.dev.requested && ctx.input(|i| i.time) > app.dev.delay {
@@ -143,5 +159,35 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
             let _ = child.wait();
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+}
+
+fn home_hooks(app: &mut KlipApp, ctx: &egui::Context) {
+    let first = app.home.projects.first().cloned();
+    if let Ok(name) = std::env::var("KLIP_DEMO_DELETE") {
+        if let Some(m) = app.home.projects.iter().find(|m| m.name == name).cloned() {
+            if app.store.delete(&m.id).is_ok() {
+                app.home.undo_delete = Some((m, ctx.input(|i| i.time) + 60.0));
+                app.refresh_home();
+            }
+        }
+    }
+    match std::env::var("KLIP_DEMO_DIALOG").as_deref() {
+        Ok("new") => {
+            app.home.new_project = Some(NewProject { name: app.store.unique_name("Untitled reel"), aspect: crate::model::Aspect::Reel, media: vec![] })
+        }
+        Ok("rename") => app.home.rename = first.as_ref().map(|m| (m.id.clone(), m.name.clone())),
+        _ => {}
+    }
+    if std::env::var_os("KLIP_DEMO_MENU").is_some() {
+        app.home.menu = first.map(|m| m.id);
+    }
+    if let Ok(name) = std::env::var("KLIP_DEMO_OPEN") {
+        if let Some(m) = app.home.projects.iter().find(|m| m.name == name).cloned() {
+            app.open_project(&m.id);
+        }
+    }
+    if std::env::var_os("KLIP_DEMO_TRASH").is_some() {
+        app.home.show_trash = true;
     }
 }

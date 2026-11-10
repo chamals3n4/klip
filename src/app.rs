@@ -5,6 +5,7 @@ use crate::audio::AudioPreview;
 use crate::export::{ExportJob, Quality};
 use crate::media::{self, Frame, GrabRequest, Grabber, StreamDecoder};
 use crate::model::*;
+use crate::store::{self, Meta, Store};
 use crate::theme;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use egui::{ColorImage, TextureHandle, TextureOptions};
@@ -64,14 +65,57 @@ pub enum Job {
     Thumb(Id, Frame),
     Strip(Id, Vec<(f64, Frame)>),
     Wave(Id, Vec<f32>),
+    /// A project cover was (re)loaded: id, edit time it reflects, pixels.
+    ProjectThumb(String, u64, Option<Frame>),
 }
 
 pub enum DialogResult {
     Import(Vec<PathBuf>),
     ImportSrt(PathBuf),
-    Open(PathBuf),
-    SaveAs(PathBuf),
+    ImportProject(PathBuf),
+    Relink(Id, PathBuf),
     ExportTo(PathBuf),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Home,
+    Editor,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HomeSort {
+    Recent,
+    Name,
+}
+
+/// The "New project" dialog.
+pub struct NewProject {
+    pub name: String,
+    pub aspect: Aspect,
+    /// Media to add once the project is created (files dropped on Home).
+    pub media: Vec<PathBuf>,
+}
+
+/// State of the home screen (project grid).
+pub struct HomeState {
+    pub projects: Vec<Meta>,
+    pub trash: Vec<Meta>,
+    pub show_trash: bool,
+    pub search: String,
+    pub sort: HomeSort,
+    /// Cover textures, keyed by project id, with the edit time they show.
+    pub thumbs: HashMap<String, (u64, TextureHandle)>,
+    pub thumbs_pending: std::collections::HashSet<String>,
+    pub new_project: Option<NewProject>,
+    /// Project being renamed: (id, new name).
+    pub rename: Option<(String, String)>,
+    /// Project whose "⋯" menu is open.
+    pub menu: Option<String>,
+    /// Project waiting for "Delete forever?" confirmation.
+    pub confirm_delete: Option<Meta>,
+    /// Last deleted project, offered for undo until the given time.
+    pub undo_delete: Option<(Meta, f64)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -174,8 +218,12 @@ impl Layer {
 }
 
 pub struct KlipApp {
+    pub screen: Screen,
+    pub store: Store,
+    pub home: HomeState,
+    /// Store id of the project open in the editor.
+    pub project_id: Option<String>,
     pub project: Project,
-    pub project_path: Option<PathBuf>,
     committed: Project,
     saved: Project,
     undo: Vec<Project>,
@@ -218,15 +266,8 @@ pub struct KlipApp {
     pub text_font: Option<PathBuf>,
     pub ctx: egui::Context,
     pub dev: crate::dev::Dev,
-    // ---- safety net
-    autosaved: Option<Project>,
-    autosave_due: f64,
-    /// A previous session found on startup: (project, its file path).
-    pub restore_offer: Option<(Project, Option<PathBuf>)>,
-    /// "Save changes?" prompt is open because the window was asked to close.
-    pub close_prompt: bool,
-    allow_close: bool,
-    close_after_save: bool,
+    /// When pending edits will be written to the store.
+    autosave_due: Option<f64>,
     last_title: String,
 }
 
@@ -253,11 +294,34 @@ impl KlipApp {
         let (jobs_tx, jobs_rx) = unbounded();
         let (dialog_tx, dialog_rx) = unbounded();
         let project = Project::default();
+        let dev = crate::dev::Dev::from_env();
+        // Automated runs get their own throwaway store unless told otherwise.
+        let data = if dev.active() && std::env::var_os("KLIP_DATA_DIR").is_none() {
+            std::env::temp_dir().join("klip_dev")
+        } else {
+            store::data_dir()
+        };
         let mut app = Self {
+            screen: Screen::Home,
+            store: Store::at(data.join("projects")),
+            home: HomeState {
+                projects: vec![],
+                trash: vec![],
+                show_trash: false,
+                search: String::new(),
+                sort: HomeSort::Recent,
+                thumbs: HashMap::new(),
+                thumbs_pending: Default::default(),
+                new_project: None,
+                rename: None,
+                menu: None,
+                confirm_delete: None,
+                undo_delete: None,
+            },
+            project_id: None,
             committed: project.clone(),
             saved: project.clone(),
             project,
-            project_path: None,
             undo: vec![],
             redo: vec![],
             selection: Selection::None,
@@ -294,33 +358,42 @@ impl KlipApp {
             toasts: vec![],
             text_font,
             ctx,
-            dev: crate::dev::Dev::from_env(),
-            autosaved: None,
-            autosave_due: 0.0,
-            restore_offer: None,
-            close_prompt: false,
-            allow_close: false,
-            close_after_save: false,
+            dev,
+            autosave_due: None,
             last_title: String::new(),
         };
-        // `klip file.mp4 project.klip …` on the command line.
+        app.migrate_v1_autosave(&data.join("autosave.klip"));
+        app.store.purge_trash(store::TRASH_TTL);
+        app.refresh_home();
+        // `klip project.klip` imports and opens it; `klip a.mp4 b.mp4` starts
+        // a new project with those clips.
         let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-        if let Some(p) = args.iter().find(|p| p.extension().is_some_and(|e| e == "klip")) {
-            app.open_project(p);
-        }
-        let opened_something = !args.is_empty();
-        let media: Vec<PathBuf> = args.into_iter().filter(|p| p.extension().is_none_or(|e| e != "klip")).collect();
-        if !media.is_empty() {
-            app.import(media);
-        }
-        if !opened_something && (!app.dev.active() || std::env::var_os("KLIP_DEMO_PROMPTS").is_some()) {
-            if let Ok((p, path)) = load_project_file(&autosave_path()) {
-                if !p.video.is_empty() || !p.media.is_empty() {
-                    app.restore_offer = Some((p, path));
-                }
-            }
+        let (klips, media): (Vec<PathBuf>, Vec<PathBuf>) = args.into_iter().partition(|p| p.extension().is_some_and(|e| e == "klip"));
+        if let Some(p) = klips.first() {
+            app.import_project_file(p);
+        } else if !media.is_empty() {
+            let name = std::env::var("KLIP_DEMO_NAME").unwrap_or_else(|_| "Untitled reel".into());
+            let aspect = std::env::var("KLIP_DEMO_ASPECT")
+                .ok()
+                .and_then(|a| Aspect::ALL.into_iter().find(|x| x.label() == a))
+                .unwrap_or(Aspect::Reel);
+            app.create_project(&name, aspect, media);
         }
         app
+    }
+
+    /// Klip 0.1 kept unsaved work in a single autosave file. Bring it into
+    /// the store as a regular project so nothing is lost.
+    fn migrate_v1_autosave(&mut self, path: &Path) {
+        let Ok((mut p, _)) = store::read_project(path) else { return };
+        if !p.video.is_empty() || !p.media.is_empty() {
+            p.name = format!("{} (recovered)", p.name);
+            if self.store.import_project(p).is_err() {
+                return;
+            }
+            self.toast(ToastKind::Info, "Your last unsaved session was added to your projects");
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     // ---------------------------------------------------------------- toasts
@@ -368,25 +441,27 @@ impl KlipApp {
         });
     }
 
-    pub fn dialog_open(&self) {
+    pub fn dialog_import_project(&self) {
         self.spawn_dialog(|| {
             rfd::FileDialog::new()
-                .set_title("Open project")
+                .set_title("Import project")
                 .add_filter("Klip project", &["klip"])
                 .pick_file()
-                .map(DialogResult::Open)
+                .map(DialogResult::ImportProject)
         });
     }
 
-    pub fn dialog_save_as(&self) {
-        let name = format!("{}.klip", safe_file_name(&self.project.name));
+    /// Point a missing media item at its new location.
+    pub fn dialog_relink(&self, id: Id) {
+        let Some(m) = self.project.media.iter().find(|m| m.id == id) else { return };
+        let title = format!("Locate “{}”", m.name);
+        let dir = m.path.parent().filter(|d| d.is_dir()).map(Path::to_path_buf);
         self.spawn_dialog(move || {
-            rfd::FileDialog::new()
-                .set_title("Save project")
-                .set_file_name(name)
-                .add_filter("Klip project", &["klip"])
-                .save_file()
-                .map(DialogResult::SaveAs)
+            let mut d = rfd::FileDialog::new().set_title(title);
+            if let Some(dir) = dir {
+                d = d.set_directory(dir);
+            }
+            d.pick_file().map(|p| DialogResult::Relink(id, p))
         });
     }
 
@@ -417,7 +492,7 @@ impl KlipApp {
                 continue;
             }
             if p.extension().is_some_and(|e| e == "klip") {
-                self.open_project(&p);
+                self.import_project_file(&p);
                 continue;
             }
             self.importing += 1;
@@ -541,14 +616,26 @@ impl KlipApp {
                 Job::Wave(id, w) => {
                     self.assets.entry(id).or_default().wave = Some(Arc::new(w));
                 }
+                Job::ProjectThumb(id, edited, f) => {
+                    self.home.thumbs_pending.remove(&id);
+                    match f {
+                        Some(f) => {
+                            let tex = self.ctx.load_texture(format!("cover{id}"), to_image(&f), TextureOptions::LINEAR);
+                            self.home.thumbs.insert(id, (edited, tex));
+                        }
+                        None => {
+                            self.home.thumbs.remove(&id);
+                        }
+                    }
+                }
             }
         }
         while let Ok(r) = self.dialog_rx.try_recv() {
             match r {
                 DialogResult::Import(p) => self.import(p),
                 DialogResult::ImportSrt(p) => self.import_srt(&p),
-                DialogResult::Open(p) => self.open_project(&p),
-                DialogResult::SaveAs(p) => self.save_to(p),
+                DialogResult::ImportProject(p) => self.import_project_file(&p),
+                DialogResult::Relink(id, p) => self.relink(id, p),
                 DialogResult::ExportTo(mut p) => {
                     if p.extension().is_none() {
                         p.set_extension("mp4");
@@ -559,60 +646,127 @@ impl KlipApp {
         }
     }
 
-    // ------------------------------------------------------- project file I/O
+    // -------------------------------------------------------------- projects
 
-    pub fn save(&mut self) {
-        match self.project_path.clone() {
-            Some(p) => self.save_to(p),
-            None => self.dialog_save_as(),
-        }
+    /// Re-read the project lists shown on the home screen.
+    pub fn refresh_home(&mut self) {
+        self.home.projects = self.store.list();
+        self.home.trash = self.store.list_trash();
     }
 
-    fn save_to(&mut self, mut path: PathBuf) {
-        if path.extension().is_none() {
-            path.set_extension("klip");
-        }
-        match crate::store::write_project(&path, &self.project, None) {
-            Ok(()) => {
-                self.saved = self.project.clone();
-                self.project_path = Some(path);
-                self.toast(ToastKind::Success, "Project saved");
-                let _ = std::fs::remove_file(autosave_path());
-                self.autosaved = None;
-                if self.close_after_save {
-                    self.allow_close = true;
-                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    /// Create a project in the store and open it, optionally with media.
+    pub fn create_project(&mut self, name: &str, aspect: Aspect, media: Vec<PathBuf>) {
+        match self.store.create(name, aspect) {
+            Ok(meta) => {
+                self.open_project(&meta.id);
+                if !media.is_empty() {
+                    self.import(media);
                 }
             }
-            Err(e) => self.toast(ToastKind::Error, format!("Save failed: {e}")),
+            Err(e) => self.toast(ToastKind::Error, format!("Could not create project: {e}")),
         }
     }
 
-    pub fn open_project(&mut self, path: &Path) {
-        match load_project_file(path).map(|(p, _)| p) {
+    pub fn open_project(&mut self, id: &str) {
+        self.leave_project();
+        match self.store.load(id) {
             Ok(p) => {
-                self.adopt_project(p, Some(path.to_path_buf()));
+                self.adopt_project(p);
+                self.project_id = Some(id.to_string());
+                self.screen = Screen::Editor;
             }
-            Err(e) => self.toast(ToastKind::Error, format!("Could not open project: {e}")),
+            Err(e) => {
+                self.toast(ToastKind::Error, format!("Could not open project: {e}"));
+                self.refresh_home();
+            }
         }
     }
 
-    /// Accept a restored session from the autosave.
-    pub fn restore_session(&mut self) {
-        if let Some((p, path)) = self.restore_offer.take() {
-            self.adopt_project(p, path);
-            // Restored work is unsaved by definition.
-            self.saved = Project::default();
-            self.toast(ToastKind::Success, "Previous session restored");
+    /// Copy a `.klip` file into the store and open it.
+    pub fn import_project_file(&mut self, path: &Path) {
+        match self.store.import_file(path) {
+            Ok(meta) => {
+                self.open_project(&meta.id);
+                self.toast(ToastKind::Success, format!("Imported “{}”", meta.name));
+            }
+            Err(e) => self.toast(ToastKind::Error, format!("Could not import project: {e}")),
         }
     }
 
-    pub fn discard_session(&mut self) {
-        self.restore_offer = None;
-        let _ = std::fs::remove_file(autosave_path());
+    /// Save the open project and return to the project grid.
+    pub fn go_home(&mut self) {
+        self.leave_project();
+        self.screen = Screen::Home;
+        self.refresh_home();
     }
 
-    fn adopt_project(&mut self, p: Project, path: Option<PathBuf>) {
+    /// Save the open project and refresh its cover.
+    fn leave_project(&mut self) {
+        self.stop();
+        if self.fullscreen {
+            self.set_fullscreen(false);
+        }
+        self.export.open = false;
+        self.save_now();
+        if let Some(id) = self.project_id.take() {
+            self.refresh_cover(&id);
+        }
+    }
+
+    /// Re-render a project's cover in the background, then show it on Home.
+    fn refresh_cover(&mut self, id: &str) {
+        let p = self.project.clone();
+        let path = self.store.thumb_path(id);
+        let edited = self.store.meta(id).map(|m| m.edited).unwrap_or(0);
+        let (tx, ctx, id) = (self.jobs_tx.clone(), self.ctx.clone(), id.to_string());
+        self.home.thumbs_pending.insert(id.clone());
+        std::thread::spawn(move || {
+            store::write_thumb(&p, &path);
+            let f = store::read_thumb(&path, p.aspect);
+            let _ = tx.send(Job::ProjectThumb(id, edited, f));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Load a cover image for the home grid (a few at a time).
+    pub fn load_cover(&mut self, meta: &Meta) {
+        if self.home.thumbs_pending.contains(&meta.id)
+            || self.home.thumbs_pending.len() >= 4
+            || self.home.thumbs.get(&meta.id).is_some_and(|t| t.0 == meta.edited)
+        {
+            return;
+        }
+        let path = self.store.cover_path(meta);
+        if !path.exists() {
+            return;
+        }
+        let (tx, ctx, id, edited, aspect) = (self.jobs_tx.clone(), self.ctx.clone(), meta.id.clone(), meta.edited, meta.aspect);
+        self.home.thumbs_pending.insert(id.clone());
+        std::thread::spawn(move || {
+            let f = store::read_thumb(&path, aspect);
+            let _ = tx.send(Job::ProjectThumb(id, edited, f));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Write pending edits to the store now.
+    pub fn save_now(&mut self) {
+        self.autosave_due = None;
+        let Some(id) = self.project_id.clone() else { return };
+        if !self.is_dirty() {
+            return;
+        }
+        match self.store.save(&id, &self.project) {
+            Ok(_) => self.saved = self.project.clone(),
+            Err(e) => {
+                self.toast(ToastKind::Error, format!("Couldn't save project: {e}"));
+                // Don't retry (and toast) every frame.
+                self.autosave_due = Some(self.ctx.input(|i| i.time) + 30.0);
+            }
+        }
+    }
+
+    fn adopt_project(&mut self, p: Project) {
         self.stop();
         let missing = p.media.iter().filter(|m| !m.path.exists()).count();
         self.project = p.clone();
@@ -622,58 +776,72 @@ impl KlipApp {
         self.redo.clear();
         self.assets.clear();
         self.selection = Selection::None;
+        self.lib_selected = None;
         self.playhead = 0.0;
-        self.project_path = path;
+        self.view_zoom = 1.0;
+        self.view_pan = egui::Vec2::ZERO;
         self.export.out = default_export_dir().join(format!("{}.mp4", safe_file_name(&self.project.name)));
         for m in self.project.media.clone() {
             self.generate_assets(&m);
         }
         self.invalidate_preview();
         if missing > 0 {
-            self.toast(ToastKind::Error, format!("{missing} media file(s) are missing"));
+            self.toast(ToastKind::Error, format!("{missing} media file(s) are missing. Click them in Media to locate."));
         }
+    }
+
+    /// Point a media item at a new file. Other missing files found in the
+    /// same folder are relinked too.
+    pub fn relink(&mut self, id: Id, path: PathBuf) {
+        let mut fixed = 0;
+        let dir = path.parent().map(Path::to_path_buf);
+        for m in self.project.media.iter_mut() {
+            let new = if m.id == id {
+                Some(path.clone())
+            } else if !m.path.exists() {
+                dir.as_ref().and_then(|d| m.path.file_name().map(|n| d.join(n))).filter(|p| p.exists())
+            } else {
+                None
+            };
+            if let Some(new) = new {
+                if let Ok(info) = media::probe(&new) {
+                    m.width = info.width;
+                    m.height = info.height;
+                    m.duration = m.duration.max(info.duration);
+                    m.has_audio = info.has_audio;
+                }
+                m.path = new;
+                fixed += 1;
+            }
+        }
+        for m in self.project.media.clone() {
+            if m.path.exists() && self.assets.get(&m.id).is_none_or(|a| a.thumb.is_none()) {
+                self.generate_assets(&m);
+            }
+        }
+        self.invalidate_preview();
+        self.toast(ToastKind::Success, if fixed == 1 { "Media relinked".to_string() } else { format!("{fixed} media files relinked") });
     }
 
     pub fn is_dirty(&self) -> bool {
         self.project != self.saved
     }
 
-    /// Write unsaved work to the autosave file every few seconds.
+    /// Edits are written to the store a moment after they happen, and
+    /// whenever the project is left or Klip quits.
     fn autosave(&mut self, ctx: &egui::Context) {
-        if self.dev.active() || !self.is_dirty() || self.restore_offer.is_some() {
+        if self.screen != Screen::Editor || !self.is_dirty() {
+            self.autosave_due = None;
             return;
         }
         let now = ctx.input(|i| i.time);
-        if now < self.autosave_due || self.autosaved.as_ref() == Some(&self.project) {
-            return;
+        let busy = ctx.input(|i| i.pointer.any_down());
+        match self.autosave_due {
+            None => self.autosave_due = Some(now + 1.5),
+            Some(t) if now >= t && !busy => self.save_now(),
+            _ => {}
         }
-        self.autosave_due = now + 15.0;
-        let path = autosave_path();
-        if crate::store::write_project(&path, &self.project, self.project_path.as_deref()).is_ok() {
-            self.autosaved = Some(self.project.clone());
-        }
-        ctx.request_repaint_after(std::time::Duration::from_secs(16));
-    }
-
-    /// Intercept window close while there are unsaved changes.
-    fn handle_close(&mut self, ctx: &egui::Context) {
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.is_dirty() && !self.dev.active() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.close_prompt = true;
-        }
-    }
-
-    pub fn close_discard(&mut self) {
-        let _ = std::fs::remove_file(autosave_path());
-        self.allow_close = true;
-        self.close_prompt = false;
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-    }
-
-    pub fn close_save(&mut self) {
-        self.close_prompt = false;
-        self.close_after_save = true;
-        self.save();
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 
     // ---------------------------------------------------------------- history
@@ -1182,6 +1350,16 @@ impl KlipApp {
         // Only a focused *text field* should swallow shortcuts. (egui also
         // focuses buttons/clips on click, which used to block Space.)
         let typing = ctx.text_edit_focused();
+        if self.screen == Screen::Home {
+            let (new, open) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND, Key::N), i.consume_key(Modifiers::COMMAND, Key::O)));
+            if new && self.home.new_project.is_none() {
+                self.home.new_project = Some(NewProject { name: self.store.unique_name("Untitled reel"), aspect: Aspect::Reel, media: vec![] });
+            }
+            if open {
+                self.dialog_import_project();
+            }
+            return;
+        }
         let mut act: Vec<&str> = vec![];
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y) {
@@ -1252,9 +1430,9 @@ impl KlipApp {
             match a {
                 "undo" => self.undo(),
                 "redo" => self.redo(),
-                "save" => self.save(),
+                "save" => self.save_now(),
                 "import" => self.dialog_import(),
-                "open" => self.dialog_open(),
+                "open" => self.dialog_import_project(),
                 "export" => self.export.open = true,
                 "play" => self.toggle_play(),
                 "split" => self.split(),
@@ -1283,7 +1461,17 @@ impl KlipApp {
 
     fn handle_os_drops(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
-        if !dropped.is_empty() {
+        if dropped.is_empty() {
+            return;
+        }
+        if self.screen == Screen::Home {
+            // A project file opens; media starts a new project with it.
+            if let Some(k) = dropped.iter().find(|p| p.extension().is_some_and(|e| e == "klip")) {
+                self.import_project_file(&k.clone());
+            } else {
+                self.home.new_project = Some(NewProject { name: self.store.unique_name("Untitled reel"), aspect: Aspect::Reel, media: dropped });
+            }
+        } else {
             self.import(dropped);
         }
     }
@@ -1301,18 +1489,16 @@ impl eframe::App for KlipApp {
         crate::ui::draw(self, ui);
 
         self.commit_history(&ctx);
-        let title = format!(
-            "{}{} — Klip",
-            if self.is_dirty() { "● " } else { "" },
-            self.project.name
-        );
+        let title = match self.screen {
+            Screen::Home => "Klip".to_string(),
+            Screen::Editor => format!("{} — Klip", self.project.name),
+        };
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
         crate::dev::tick(self, &ctx);
         self.autosave(&ctx);
-        self.handle_close(&ctx);
         if self.importing > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -1320,8 +1506,9 @@ impl eframe::App for KlipApp {
 
     fn on_exit(&mut self) {
         self.stop();
-        if !self.is_dirty() {
-            let _ = std::fs::remove_file(autosave_path());
+        self.save_now();
+        if let Some(id) = &self.project_id {
+            store::write_thumb(&self.project, &self.store.thumb_path(id));
         }
         if let Some(j) = &self.export.job {
             if j.state().1 == crate::export::ExportStatus::Running {
@@ -1329,16 +1516,6 @@ impl eframe::App for KlipApp {
             }
         }
     }
-}
-
-/// `~/.local/share/klip/autosave.klip` (or `$XDG_DATA_HOME/klip/…`).
-pub fn autosave_path() -> PathBuf {
-    crate::store::data_dir().join("autosave.klip")
-}
-
-/// Read a `.klip` file: (project, the path it was saved from, if recorded).
-pub fn load_project_file(path: &Path) -> Result<(Project, Option<PathBuf>), String> {
-    crate::store::read_project(path)
 }
 
 pub fn to_image(f: &Frame) -> ColorImage {
