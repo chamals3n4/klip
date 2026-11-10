@@ -1,0 +1,47 @@
+# Build and test every pull request and every push to main.
+# The job name "Build and test" is what the main-branch ruleset requires.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev ffmpeg fontconfig fonts-dejavu-core
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked
+
+      # Includes the end-to-end export test, which renders a real MP4 with FFmpeg.
+      - name: Test
+        run: cargo test --locked -- --include-ignored
