@@ -182,41 +182,54 @@ pub fn build_args(p: &Project, s: &ExportSettings, tmp: &Path) -> Result<Vec<Str
     let _ = write!(fg, "[{av}]null[vcat];[{aa}]anull[acat];");
 
     // --- text overlays ----------------------------------------------------
+    // Each line is drawn and centred on its own (drawtext's `text_align` only
+    // exists in FFmpeg 6.1+, and Ubuntu 22.04 / Debian 12 ship older builds).
+    // Lines sit on a fixed pitch; the font's glyph extents keep baselines even.
     let mut vlabel = "vcat".to_string();
     let texts: Vec<_> = p.texts.iter().filter(|t| t.start < total && !t.text.trim().is_empty()).collect();
+    let mut n_draw = 0usize;
     for (i, t) in texts.iter().enumerate() {
-        let file = tmp.join(format!("text{i}.txt"));
-        std::fs::write(&file, &t.text).map_err(|e| e.to_string())?;
         let size = (t.size * k).max(4.0);
-        let mut opts = format!(
-            "textfile={}:fontsize={size:.1}:fontcolor={}:text_align=C:line_spacing={:.0}:x=(w*{:.4})-text_w/2:y=(h*{:.4})-text_h/2:enable='between(t,{:.3},{:.3})'",
-            q(&file.to_string_lossy()),
-            hex(t.color),
-            size * 0.12,
-            t.x,
-            t.y,
-            t.start,
-            t.end()
-        );
-        if let Some(f) = &s.font {
-            let _ = write!(opts, ":fontfile={}", q(&f.to_string_lossy()));
+        let lines: Vec<&str> = t.text.lines().collect();
+        let pitch = size * 1.25;
+        let block = pitch * lines.len() as f32;
+        for (li, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                continue; // blank line: keeps its space, nothing to draw
+            }
+            let file = tmp.join(format!("text{i}_{li}.txt"));
+            std::fs::write(&file, line).map_err(|e| e.to_string())?;
+            let top = li as f32 * pitch - block / 2.0;
+            let mut opts = format!(
+                "textfile={}:fontsize={size:.1}:fontcolor={}:x='(w*{:.4})-text_w/2':y='(h*{:.4})+({top:.2})+({pitch:.2}-(max_glyph_a-max_glyph_d))/2':enable='between(t,{:.3},{:.3})'",
+                q(&file.to_string_lossy()),
+                hex(t.color),
+                t.x,
+                t.y,
+                t.start,
+                t.end()
+            );
+            if let Some(f) = &s.font {
+                let _ = write!(opts, ":fontfile={}", q(&f.to_string_lossy()));
+            }
+            match t.style {
+                TextStyle::Plain => {}
+                TextStyle::Outline => {
+                    let _ = write!(opts, ":borderw={:.1}:bordercolor=black", (size * 0.07).max(1.0));
+                }
+                TextStyle::Boxed => {
+                    let _ = write!(opts, ":box=1:boxcolor=black@0.62:boxborderw={:.0}", size * 0.28);
+                }
+                TextStyle::Shadow => {
+                    let d = (size * 0.06).max(1.0);
+                    let _ = write!(opts, ":shadowx={d:.0}:shadowy={d:.0}:shadowcolor=black@0.7");
+                }
+            }
+            let out = format!("t{n_draw}");
+            n_draw += 1;
+            let _ = write!(fg, "[{vlabel}]drawtext={opts}[{out}];");
+            vlabel = out;
         }
-        match t.style {
-            TextStyle::Plain => {}
-            TextStyle::Outline => {
-                let _ = write!(opts, ":borderw={:.1}:bordercolor=black", (size * 0.07).max(1.0));
-            }
-            TextStyle::Boxed => {
-                let _ = write!(opts, ":box=1:boxcolor=black@0.62:boxborderw={:.0}", size * 0.28);
-            }
-            TextStyle::Shadow => {
-                let d = (size * 0.06).max(1.0);
-                let _ = write!(opts, ":shadowx={d:.0}:shadowy={d:.0}:shadowcolor=black@0.7");
-            }
-        }
-        let out = format!("t{i}");
-        let _ = write!(fg, "[{vlabel}]drawtext={opts}[{out}];");
-        vlabel = out;
     }
 
     // --- music / sfx --------------------------------------------------------
@@ -354,7 +367,7 @@ mod tests {
         let dir = std::env::temp_dir().join("klip_test_media");
         gen_media(&dir);
         let mut p = Project::default();
-        let mut add = |p: &mut Project, f: &str| {
+        let add = |p: &mut Project, f: &str| {
             let mut m = crate::media::probe(&dir.join(f)).unwrap();
             m.id = p.new_id();
             p.media.push(m.clone());
