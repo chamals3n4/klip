@@ -17,6 +17,7 @@ struct Voice {
     path: PathBuf,
     src_t: f64,
     dur: f64,
+    speed: f64,
     volume: f32,
     retried: bool,
     log: Arc<Mutex<String>>,
@@ -39,13 +40,16 @@ impl Default for AudioPreview {
     }
 }
 
-fn spawn(path: &Path, src_t: f64, dur: f64, volume: f32, log: Arc<Mutex<String>>) -> Option<Child> {
+/// Play `dur` seconds of output, reading the source from `src_t` at `speed`.
+fn spawn(path: &Path, src_t: f64, dur: f64, speed: f64, volume: f32, log: Arc<Mutex<String>>) -> Option<Child> {
+    let tempo = crate::fx::atempo(speed);
+    let af = if tempo.is_empty() { format!("volume={volume:.3}") } else { format!("{tempo},volume={volume:.3}") };
     let mut child = ffmpeg()
         .args(["-ss", &format!("{:.3}", src_t.max(0.0))])
-        .args(["-t", &format!("{dur:.3}")])
+        .args(["-t", &format!("{:.3}", dur * speed)])
         .arg("-i")
         .arg(path)
-        .args(["-vn", "-af", &format!("volume={volume:.3}"), "-ac", "2", "-ar", "48000"])
+        .args(["-vn", "-af", &af, "-ac", "2", "-ar", "48000"])
         .args(["-f", "pulse", "-buffer_duration", "50", "Klip preview"])
         .stderr(Stdio::piped())
         .spawn()
@@ -65,18 +69,19 @@ impl AudioPreview {
         self.voices.contains_key(key)
     }
 
-    pub fn play(&mut self, key: String, path: &Path, src_t: f64, dur: f64, volume: f32) {
+    /// Play `dur` seconds (timeline time) of `path` from `src_t`, at `speed`.
+    pub fn play(&mut self, key: String, path: &Path, src_t: f64, dur: f64, speed: f64, volume: f32) {
         self.stop(&key);
         let silent = dur <= 0.02 || volume <= 0.001 || self.muted;
         let log = Arc::new(Mutex::new(String::new()));
         // Silent voices are still tracked so we don't retry every frame.
-        let child = if silent { None } else { spawn(path, src_t, dur, volume, log.clone()) };
+        let child = if silent { None } else { spawn(path, src_t, dur, speed, volume, log.clone()) };
         if self.debug {
             eprintln!("[audio] start {key} @{src_t:.2}s for {dur:.2}s vol {volume:.2} → {}", if child.is_some() { "ok" } else { "none" });
         }
         self.voices.insert(
             key,
-            Voice { child, started: Instant::now(), path: path.to_path_buf(), src_t, dur, volume, retried: false, log },
+            Voice { child, started: Instant::now(), path: path.to_path_buf(), src_t, dur, speed, volume, retried: false, log },
         );
     }
 
@@ -95,10 +100,10 @@ impl AudioPreview {
             if !v.retried && age < 2.0 && v.dur - age > 0.1 {
                 v.retried = true;
                 v.started = Instant::now();
-                v.src_t += age;
+                v.src_t += age * v.speed;
                 v.dur -= age;
                 v.log = Arc::new(Mutex::new(String::new()));
-                v.child = spawn(&v.path, v.src_t, v.dur, v.volume, v.log.clone());
+                v.child = spawn(&v.path, v.src_t, v.dur, v.speed, v.volume, v.log.clone());
             }
         }
     }

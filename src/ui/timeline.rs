@@ -576,7 +576,8 @@ fn apply_drag(app: &mut KlipApp, t: f64, g: &Geo) {
     match (kind, mode) {
         (ClipKind::Video, DragMode::TrimL) => {
             let (src_out, max_in) = (len, len - min);
-            let mut v = (src_in + d).clamp(0.0, max_in);
+            let speed = app.project.video.iter().find(|c| c.id == id).map_or(1.0, |c| c.speed());
+            let mut v = (src_in + d * speed).clamp(0.0, max_in);
             // Keep the cut on a frame boundary.
             v = (v * FPS).round() / FPS;
             if let Some(c) = app.project.video.iter_mut().find(|c| c.id == id) {
@@ -590,8 +591,9 @@ fn apply_drag(app: &mut KlipApp, t: f64, g: &Geo) {
             let max = media.map(|m| if m.kind == MediaKind::Image { 3600.0 } else { m.duration }).unwrap_or(len);
             // Snap the clip's right edge on the timeline.
             let start_t: f64 = app.project.video[..i].iter().map(|c| c.dur()).sum();
-            let end_t = snap(app, start_t + (len + d - src_in), id, g);
-            let v = (src_in + end_t - start_t).clamp(src_in + min, max);
+            let speed = app.project.video[i].speed();
+            let end_t = snap(app, start_t + (len - src_in) / speed + d, id, g);
+            let v = (src_in + (end_t - start_t) * speed).clamp(src_in + min, max);
             app.project.video[i].src_out = (v * FPS).round() / FPS;
         }
         (ClipKind::Video, DragMode::Move) => {}
@@ -690,7 +692,7 @@ fn paint_video_clip(app: &KlipApp, p: &egui::Painter, r: Rect, id: Id, sel: bool
                 if x > clip_vis.right() {
                     break;
                 }
-                let ts = c.src_in + ((x + tile_w / 2.0 - inner.left()) as f64 / g.pps);
+                let ts = c.src_at((x + tile_w / 2.0 - inner.left()) as f64 / g.pps);
                 let tex = a
                     .strip
                     .iter()
@@ -716,7 +718,13 @@ fn paint_video_clip(app: &KlipApp, p: &egui::Painter, r: Rect, id: Id, sel: bool
     ip.text(
         Pos2::new(lx, label_r.center().y),
         Align2::LEFT_CENTER,
-        format!("{}{}  {}", if muted { format!("{} ", ph::SPEAKER_SLASH) } else { String::new() }, clip_len(c.dur()), elide(name, r.width() - 70.0, 6.2)),
+        format!(
+            "{}{}{}  {}",
+            if muted { format!("{} ", ph::SPEAKER_SLASH) } else { String::new() },
+            if (c.speed() - 1.0).abs() > 1e-3 { format!("{}× · ", fmt_speed(c.speed())) } else { String::new() },
+            clip_len(c.dur()),
+            elide(name, r.width() - 70.0, 6.2)
+        ),
         FontId::proportional(10.5),
         Color32::WHITE.gamma_multiply(alpha),
     );
@@ -823,4 +831,10 @@ fn clip_len(d: f64) -> String {
         let s = d.round() as i64;
         if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
     }
+}
+
+/// 2, 1.5, 0.25
+pub fn fmt_speed(s: f64) -> String {
+    let t = format!("{s:.2}");
+    t.trim_end_matches('0').trim_end_matches('.').to_string()
 }

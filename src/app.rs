@@ -29,6 +29,7 @@ pub enum VideoTab {
     Basic,
     Adjust,
     Audio,
+    Speed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1203,20 +1204,20 @@ impl KlipApp {
                     Some(d) if d.clip_id == clip.id => Some(d),
                     other => {
                         self.next_decoder = other;
-                        StreamDecoder::new(self.ctx.clone(), clip.id, &m.path, clip.src_in + local, clip.dur() - local, t, w, h)
+                        StreamDecoder::new(self.ctx.clone(), clip.id, &m.path, clip.src_at(local), clip.speed(), clip.dur() - local, t, w, h)
                     }
                 };
             }
             if slot == 1 && self.next_decoder.as_ref().is_none_or(|d| d.clip_id != clip.id) {
                 self.next_decoder =
-                    StreamDecoder::new(self.ctx.clone(), clip.id, &m.path, clip.src_in + local, clip.dur() - local, t, w, h);
+                    StreamDecoder::new(self.ctx.clone(), clip.id, &m.path, clip.src_at(local), clip.speed(), clip.dur() - local, t, w, h);
             }
             let dec = if slot == 0 { self.decoder.as_mut() } else { self.next_decoder.as_mut() };
             if let Some(f) = dec.and_then(|d| d.frame_for(t)) {
                 self.show_frame(slot, clip.id, m.id, f);
             }
         } else {
-            let src_t = if m.kind == MediaKind::Image { 0.0 } else { clip.src_in + local };
+            let src_t = if m.kind == MediaKind::Image { 0.0 } else { clip.src_at(local) };
             let key = (m.id, (src_t * FPS).round() as i64);
             let l = &mut self.layers[slot];
             if l.requested != Some(key) {
@@ -1296,7 +1297,7 @@ impl KlipApp {
                         if nm.kind == MediaKind::Video {
                             let (nw, nh) = media::fit_size(&nm, 1280, 1280);
                             self.next_decoder =
-                                StreamDecoder::new(self.ctx.clone(), next.id, &nm.path, next.src_in, next.dur(), ns, nw, nh);
+                                StreamDecoder::new(self.ctx.clone(), next.id, &nm.path, next.src_in, next.speed(), next.dur(), ns, nw, nh);
                         }
                     }
                 }
@@ -1324,7 +1325,7 @@ impl KlipApp {
                 if let Some(m) = self.project.media(c.media).cloned() {
                     if m.has_audio {
                         let local = (t - s).clamp(0.0, c.dur());
-                        self.audio.play(key.clone(), &m.path, c.src_in + local, c.dur() - local, c.volume);
+                        self.audio.play(key.clone(), &m.path, c.src_at(local), c.dur() - local, c.speed(), c.volume);
                     }
                 }
                 self.voices.push(key);
@@ -1336,7 +1337,7 @@ impl KlipApp {
                         let off = t - a.start;
                         let len = (a.end() - t).min(total - t);
                         let path = am.path.clone();
-                        self.audio.play(k, &path, a.src_in + off, len, a.volume);
+                        self.audio.play(k, &path, a.src_in + off, len, 1.0, a.volume);
                     }
                 }
             }
