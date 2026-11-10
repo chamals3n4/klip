@@ -96,6 +96,10 @@ pub struct VideoClip {
     /// Transition into the *next* clip on the main track.
     #[serde(default)]
     pub transition: Option<Transition>,
+    /// Playback speed (0.25–4×). The clip lasts `source length / speed`
+    /// on the timeline.
+    #[serde(default = "one")]
+    pub speed: f32,
 }
 
 fn one() -> f32 {
@@ -121,11 +125,38 @@ impl VideoClip {
             filter_amount: 1.0,
             adjust: Adjust::default(),
             transition: None,
+            speed: 1.0,
         }
     }
 
-    pub fn dur(&self) -> f64 {
+    pub const SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.25..=4.0;
+
+    /// Effective speed, kept in range.
+    pub fn speed(&self) -> f64 {
+        self.speed.clamp(*Self::SPEED_RANGE.start(), *Self::SPEED_RANGE.end()) as f64
+    }
+
+    /// Seconds of source media the clip uses.
+    pub fn src_len(&self) -> f64 {
         (self.src_out - self.src_in).max(0.0)
+    }
+
+    /// Seconds the clip lasts on the timeline.
+    pub fn dur(&self) -> f64 {
+        self.src_len() / self.speed()
+    }
+
+    /// Source time shown `local` timeline seconds into the clip.
+    pub fn src_at(&self, local: f64) -> f64 {
+        self.src_in + local * self.speed()
+    }
+
+    /// Change speed, keeping fades within the new length.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed.clamp(*Self::SPEED_RANGE.start(), *Self::SPEED_RANGE.end());
+        let half = (self.dur() / 2.0) as f32;
+        self.fade_in = self.fade_in.min(half);
+        self.fade_out = self.fade_out.min(half);
     }
 
     pub fn grade(&self) -> Adjust {
@@ -362,7 +393,7 @@ impl Project {
         let mut right = c.clone();
         right.id = self.new_id();
         right.fade_in = 0.0;
-        let cut = self.video[i].src_in + local;
+        let cut = self.video[i].src_at(local);
         self.video[i].src_out = cut;
         // The left half now ends on a hard cut; the right half keeps the
         // original outgoing transition and fade-out.
@@ -518,5 +549,28 @@ mod tests {
     #[test]
     fn timecode_format() {
         assert_eq!(timecode(61.5), "01:01.15");
+    }
+
+    #[test]
+    fn speed_changes_timing() {
+        let mut c = VideoClip::new(1, 1, 2.0, 6.0, FitMode::Fill);
+        c.fade_out = 3.0;
+        c.set_speed(2.0);
+        assert_eq!(c.dur(), 2.0);
+        assert_eq!(c.src_at(1.0), 4.0);
+        assert_eq!(c.fade_out, 1.0, "fades shrink with the clip");
+        c.set_speed(10.0);
+        assert_eq!(c.speed, 4.0, "clamped");
+
+        // Splitting a 2× clip at 1 s of timeline cuts the source at 4 s.
+        let mut p = Project::default();
+        let mut c = VideoClip::new(1, 1, 2.0, 6.0, FitMode::Fill);
+        c.set_speed(2.0);
+        p.video.push(c);
+        p.next_id = 2;
+        p.split_video(1.0).unwrap();
+        assert_eq!((p.video[0].src_out, p.video[1].src_in), (4.0, 4.0));
+        assert_eq!((p.video[0].dur(), p.video[1].dur()), (1.0, 1.0));
+        assert_eq!(p.video[1].speed, 2.0);
     }
 }

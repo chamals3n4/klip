@@ -2,7 +2,7 @@
 
 use crate::app::{KlipApp, LeftTab, Selection, VideoTab};
 use crate::fx::FilterPreset;
-use crate::model::{Aspect, FitMode, MediaKind, TextStyle, timecode};
+use crate::model::{Aspect, FitMode, MediaKind, TextStyle, VideoClip, timecode};
 use crate::theme::*;
 use egui::{Color32, CornerRadius, Margin, RichText, Sense, Stroke, StrokeKind, Vec2};
 use egui_phosphor::regular as ph;
@@ -88,10 +88,17 @@ fn video_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
     }
     ui.add_space(10.0);
     let has_audio = media.as_ref().is_some_and(|m| m.has_audio);
+    let is_image = media.as_ref().is_some_and(|m| m.kind == MediaKind::Image);
     let mut tabs = vec![(VideoTab::Basic, "Basic"), (VideoTab::Adjust, "Adjust")];
     if has_audio {
         tabs.push((VideoTab::Audio, "Audio"));
     } else if app.video_tab == VideoTab::Audio {
+        app.video_tab = VideoTab::Basic;
+    }
+    // Photos have no speed; their length is set directly.
+    if !is_image {
+        tabs.push((VideoTab::Speed, "Speed"));
+    } else if app.video_tab == VideoTab::Speed {
         app.video_tab = VideoTab::Basic;
     }
     segmented(ui, &mut app.video_tab, &tabs);
@@ -149,13 +156,14 @@ fn video_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
 
             ui.add_space(10.0);
             section(ui, "Timing");
-            let is_image = media.as_ref().is_some_and(|m| m.kind == MediaKind::Image);
             let max = media.as_ref().map(|m| if is_image { 3600.0 } else { m.duration }).unwrap_or(0.0);
             let c = &mut app.project.video[i];
+            let speed = c.speed();
             let mut dur = c.dur();
             row(ui, "Duration", |ui| {
-                if ui.add(egui::DragValue::new(&mut dur).range(0.1..=(max - c.src_in).max(0.1)).speed(0.05).suffix(" s").max_decimals(2)).changed() {
-                    c.src_out = c.src_in + dur;
+                let max_dur = ((max - c.src_in) / speed).max(0.1);
+                if ui.add(egui::DragValue::new(&mut dur).range(0.1..=max_dur).speed(0.05).suffix(" s").max_decimals(2)).changed() {
+                    c.src_out = c.src_in + dur * speed;
                 }
             });
             if !is_image {
@@ -163,6 +171,29 @@ fn video_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
                 row(ui, "Trim in", |ui| {
                     ui.add(egui::DragValue::new(&mut c.src_in).range(0.0..=(src_out - 0.1)).speed(0.05).suffix(" s").max_decimals(2));
                 });
+            }
+        }
+        VideoTab::Speed => {
+            section(ui, "Speed");
+            let c = &mut app.project.video[i];
+            let before = c.speed;
+            let mut s = c.speed;
+            speed_presets(ui, &mut s);
+            slider_row(ui, "Custom", &mut s, VideoClip::SPEED_RANGE, 1.0, num("×", 2, 0.05));
+            if (s - before).abs() > 1e-4 {
+                c.set_speed(s);
+                app.invalidate_preview();
+            }
+            let c = &app.project.video[i];
+            ui.add_space(10.0);
+            section(ui, "Length");
+            stat(ui, "Source clip", &format!("{:.2} s", c.src_len()));
+            stat(ui, "On timeline", &format!("{:.2} s", c.dur()));
+            ui.add_space(6.0);
+            ui.label(RichText::new("Sound keeps its pitch at any speed.").size(12.0).color(TEXT_FAINT));
+            if (c.speed() - 1.0).abs() > 1e-3 && link_button(ui, "Reset to 1×").clicked() {
+                app.project.video[i].set_speed(1.0);
+                app.invalidate_preview();
             }
         }
         VideoTab::Adjust => {
@@ -512,4 +543,35 @@ fn stat(ui: &mut egui::Ui, k: &str, v: &str) {
             ui.label(RichText::new(v).color(TEXT));
         });
     });
+}
+
+/// Quick picks for common speeds (CapCut-style chips).
+fn speed_presets(ui: &mut egui::Ui, speed: &mut f32) {
+    const PRESETS: [f32; 6] = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0];
+    let gap = 6.0;
+    let w = ((ui.available_width() - gap * (PRESETS.len() as f32 - 1.0)) / PRESETS.len() as f32).floor();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for p in PRESETS {
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 30.0), egui::Sense::click());
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let on = (*speed - p).abs() < 1e-3;
+            let h = anim(ui, ("speed_chip", (p * 100.0) as i32), resp.hovered());
+            let s = anim(ui, ("speed_chip_on", (p * 100.0) as i32), on);
+            let painter = ui.painter();
+            painter.rect_filled(rect, egui::CornerRadius::same(R_SM), mix(mix(BG2, BG3, h), ACCENT.gamma_multiply(0.18), s));
+            painter.rect_stroke(rect, egui::CornerRadius::same(R_SM), egui::Stroke::new(1.0, mix(BORDER, ACCENT, s)), egui::StrokeKind::Inside);
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{}×", crate::ui::timeline::fmt_speed(p as f64)),
+                egui::FontId::new(12.5, medium_family()),
+                mix(TEXT_DIM, TEXT, s.max(h)),
+            );
+            if resp.clicked() {
+                *speed = p;
+            }
+        }
+    });
+    ui.add_space(6.0);
 }

@@ -92,7 +92,7 @@ pub fn build_args(p: &Project, s: &ExportSettings, tmp: &Path) -> Result<Vec<Str
             args.extend(["-t".into(), format!("{dur:.3}")]);
         } else {
             args.extend(["-ss".into(), format!("{:.3}", c.src_in)]);
-            args.extend(["-t".into(), format!("{dur:.3}")]);
+            args.extend(["-t".into(), format!("{:.3}", c.src_len())]);
         }
         args.extend(["-i".into(), m.path.to_string_lossy().into_owned()]);
         let n = input;
@@ -100,7 +100,8 @@ pub fn build_args(p: &Project, s: &ExportSettings, tmp: &Path) -> Result<Vec<Str
 
         let grade = c.grade().ffmpeg();
         let grade = if grade.is_empty() { String::new() } else { format!(",{grade}") };
-        let _ = write!(fg, "[{n}:v]fps={FPS},setpts=PTS-STARTPTS,setsar=1{grade},split[b{i}][f{i}];");
+        let speed = if m.kind == MediaKind::Image { 1.0 } else { c.speed() };
+        let _ = write!(fg, "[{n}:v]setpts=(PTS-STARTPTS)/{speed:.4},fps={FPS},setsar=1{grade},split[b{i}][f{i}];");
 
         // Background.
         if c.fit == FitMode::Blur {
@@ -143,7 +144,11 @@ pub fn build_args(p: &Project, s: &ExportSettings, tmp: &Path) -> Result<Vec<Str
         if m.has_audio {
             let _ = write!(
                 fg,
-                "[{n}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={:.3},apad,atrim=0:{dur:.3},asetpts=PTS-STARTPTS",
+                "[{n}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,{}volume={:.3},apad,atrim=0:{dur:.3},asetpts=PTS-STARTPTS",
+                match crate::fx::atempo(speed) {
+                    t if t.is_empty() => t,
+                    t => format!("{t},"),
+                },
                 c.volume
             );
         } else {
@@ -393,6 +398,9 @@ mod tests {
         p.video[1].adjust.saturation = 1.4;
         p.video[1].transition = Some(crate::fx::Transition { kind: crate::fx::TransitionKind::Mix, dur: 0.4 });
         p.video[3].fade_out = 0.4;
+        // Speed: 2× (2 s → 1 s) and 0.5× (1 s → 2 s).
+        p.video[1].set_speed(2.0);
+        p.video[3].set_speed(0.5);
         for (i, st) in TextStyle::ALL.iter().enumerate() {
             let id = p.new_id();
             p.texts.push(TextClip { id, text: format!("Style {} it's: \"quoted\"\nline two", st.label()), start: i as f64, dur: 2.0, x: 0.5, y: 0.2 + i as f32 * 0.2, size: 70.0, color: [255, 214, 10], style: *st, is_caption: false });

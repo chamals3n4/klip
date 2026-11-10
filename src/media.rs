@@ -266,24 +266,27 @@ pub struct StreamDecoder {
 }
 
 impl StreamDecoder {
-    /// Decode `path` from `src_t` for `dur` seconds; frames are stamped with
-    /// timeline time starting at `timeline_t`.
+    /// Decode `path` from `src_t` at `speed`, for `dur` seconds of timeline;
+    /// frames are stamped with timeline time starting at `timeline_t`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: egui::Context,
         clip_id: u64,
         path: &Path,
         src_t: f64,
+        speed: f64,
         dur: f64,
         timeline_t: f64,
         w: usize,
         h: usize,
     ) -> Option<Self> {
+        let retime = if (speed - 1.0).abs() < 1e-3 { String::new() } else { format!("setpts=(PTS-STARTPTS)/{speed:.4},") };
         let mut child = ffmpeg()
             .args(["-ss", &format!("{:.3}", src_t.max(0.0))])
             .arg("-i")
             .arg(path)
             .args(["-t", &format!("{:.3}", dur.max(0.05))])
-            .args(["-an", "-vf", &format!("fps={FPS},scale={w}:{h}:flags=bilinear")])
+            .args(["-an", "-vf", &format!("{retime}fps={FPS},scale={w}:{h}:flags=bilinear")])
             .args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
             .stdout(Stdio::piped())
             .spawn()

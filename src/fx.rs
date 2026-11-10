@@ -188,6 +188,26 @@ impl FilterPreset {
 }
 
 /// Final grade for a clip: preset at `amount`, then the user's adjustments.
+/// FFmpeg audio filter that changes tempo by `speed` without changing pitch.
+/// `atempo` only takes 0.5–2, so larger changes are chained. Empty at 1×.
+pub fn atempo(speed: f64) -> String {
+    if (speed - 1.0).abs() < 1e-3 {
+        return String::new();
+    }
+    let mut parts = vec![];
+    let mut s = speed;
+    while s > 2.0 {
+        parts.push("atempo=2".to_string());
+        s /= 2.0;
+    }
+    while s < 0.5 {
+        parts.push("atempo=0.5".to_string());
+        s /= 0.5;
+    }
+    parts.push(format!("atempo={s:.4}"));
+    parts.join(",")
+}
+
 pub fn grade(preset: FilterPreset, amount: f32, user: &Adjust) -> Adjust {
     preset.look().scaled(amount).then(user)
 }
@@ -275,5 +295,13 @@ mod tests {
         let mut px = vec![200, 50, 50, 255];
         FilterPreset::Mono.look().apply(&mut px);
         assert!((px[0] as i32 - px[1] as i32).abs() <= 2 && (px[1] as i32 - px[2] as i32).abs() <= 2);
+    }
+
+    #[test]
+    fn atempo_chains_outside_its_range() {
+        assert_eq!(super::atempo(1.0), "");
+        assert_eq!(super::atempo(1.5), "atempo=1.5000");
+        assert_eq!(super::atempo(4.0), "atempo=2,atempo=2.0000");
+        assert_eq!(super::atempo(0.25), "atempo=0.5,atempo=0.5000");
     }
 }
