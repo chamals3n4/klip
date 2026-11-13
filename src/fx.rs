@@ -23,11 +23,13 @@ pub struct Adjust {
     pub temperature: f32,
     /// 0 ..= 1 (washed-out film look)
     pub fade: f32,
+    /// -1 (green) ..= 1 (magenta)
+    pub tint: f32,
 }
 
 impl Default for Adjust {
     fn default() -> Self {
-        Self { brightness: 0.0, contrast: 1.0, saturation: 1.0, temperature: 0.0, fade: 0.0 }
+        Self { brightness: 0.0, contrast: 1.0, saturation: 1.0, temperature: 0.0, fade: 0.0, tint: 0.0 }
     }
 }
 
@@ -46,6 +48,7 @@ impl Adjust {
             saturation: l(n.saturation, self.saturation),
             temperature: l(n.temperature, self.temperature),
             fade: l(n.fade, self.fade),
+            tint: l(n.tint, self.tint),
         }
     }
 
@@ -57,12 +60,13 @@ impl Adjust {
             saturation: (self.saturation * user.saturation).clamp(0.0, 2.5),
             temperature: (self.temperature + user.temperature).clamp(-1.5, 1.5),
             fade: (self.fade + user.fade).clamp(0.0, 1.0),
+            tint: (self.tint + user.tint).clamp(-1.5, 1.5),
         }
     }
 
     fn gains(&self) -> [f32; 3] {
-        let t = self.temperature;
-        [1.0 + 0.12 * t, 1.0 + 0.02 * t, 1.0 - 0.12 * t]
+        let (t, m) = (self.temperature, self.tint);
+        [1.0 + 0.12 * t + 0.05 * m, 1.0 + 0.02 * t - 0.1 * m, 1.0 - 0.12 * t + 0.03 * m]
     }
 
     fn fade_k(&self) -> f32 {
@@ -142,10 +146,12 @@ pub enum FilterPreset {
     Mono,
     Noir,
     Dream,
+    /// Black & white with a soft pink glow (the classic motivational edit).
+    Rose,
 }
 
 impl FilterPreset {
-    pub const ALL: [FilterPreset; 9] = [
+    pub const ALL: [FilterPreset; 10] = [
         FilterPreset::None,
         FilterPreset::Vivid,
         FilterPreset::Warm,
@@ -155,6 +161,7 @@ impl FilterPreset {
         FilterPreset::Mono,
         FilterPreset::Noir,
         FilterPreset::Dream,
+        FilterPreset::Rose,
     ];
 
     pub fn label(self) -> &'static str {
@@ -168,6 +175,7 @@ impl FilterPreset {
             FilterPreset::Mono => "Mono",
             FilterPreset::Noir => "Noir",
             FilterPreset::Dream => "Dream",
+            FilterPreset::Rose => "Rose",
         }
     }
 
@@ -182,7 +190,8 @@ impl FilterPreset {
             FilterPreset::Faded => Adjust { contrast: 0.85, saturation: 0.7, fade: 0.7, brightness: 0.03, ..a },
             FilterPreset::Mono => Adjust { saturation: 0.0, contrast: 1.05, ..a },
             FilterPreset::Noir => Adjust { saturation: 0.0, contrast: 1.4, brightness: -0.04, ..a },
-            FilterPreset::Dream => Adjust { brightness: 0.06, contrast: 0.88, saturation: 1.15, temperature: 0.2, fade: 0.3 },
+            FilterPreset::Dream => Adjust { brightness: 0.06, contrast: 0.88, saturation: 1.15, temperature: 0.2, fade: 0.3, ..a },
+            FilterPreset::Rose => Adjust { saturation: 0.0, contrast: 1.08, brightness: -0.02, temperature: 0.3, tint: 0.55, fade: 0.18 },
         }
     }
 }
@@ -278,6 +287,150 @@ pub struct Transition {
     pub dur: f64,
 }
 
+
+// ---------------------------------------------------------------------------
+// Masks
+// ---------------------------------------------------------------------------
+
+/// Shape that cuts out part of a clip, like CapCut's masks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum MaskShape {
+    #[default]
+    None,
+    Circle,
+    Rect,
+    Heart,
+    Star,
+    /// A horizontal band across the frame (letterbox / "mirror").
+    Band,
+}
+
+impl MaskShape {
+    pub const ALL: [MaskShape; 6] = [MaskShape::None, MaskShape::Circle, MaskShape::Rect, MaskShape::Heart, MaskShape::Star, MaskShape::Band];
+    pub fn label(self) -> &'static str {
+        match self {
+            MaskShape::None => "None",
+            MaskShape::Circle => "Circle",
+            MaskShape::Rect => "Rectangle",
+            MaskShape::Heart => "Heart",
+            MaskShape::Star => "Star",
+            MaskShape::Band => "Band",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Mask {
+    pub shape: MaskShape,
+    /// Shape size relative to the frame (1 = touches the shorter side).
+    pub size: f32,
+    /// Soft edge, 0–1.
+    pub feather: f32,
+    /// Corner rounding for rectangles, 0–1.
+    pub round: f32,
+    /// Keep the outside instead of the inside.
+    pub invert: bool,
+    /// Rectangle width ÷ height; 0 follows the clip's own shape.
+    #[serde(default)]
+    pub ratio: f32,
+}
+
+impl Default for Mask {
+    fn default() -> Self {
+        Self { shape: MaskShape::None, size: 0.8, feather: 0.04, round: 0.2, invert: false, ratio: 0.0 }
+    }
+}
+
+impl Mask {
+    pub fn is_none(&self) -> bool {
+        self.shape == MaskShape::None
+    }
+
+    /// Opacity (0–1) at pixel centre (`x`, `y`) of a `w`×`h` frame.
+    pub fn alpha(&self, x: f32, y: f32, w: f32, h: f32) -> f32 {
+        if self.is_none() {
+            return 1.0;
+        }
+        // Units of the shorter side, origin at the centre, y up.
+        let m = w.min(h);
+        let px = (x - w / 2.0) / m;
+        let py = (h / 2.0 - y) / m;
+        let s = self.size.max(0.01);
+        let d = match self.shape {
+            MaskShape::None => -1.0,
+            MaskShape::Circle => (px * px + py * py).sqrt() - 0.5 * s,
+            MaskShape::Rect => {
+                // Fixed ratio: `size` is the height in units of the shorter side.
+                let (hx, hy) = if self.ratio > 0.0 { (0.5 * s * self.ratio, 0.5 * s) } else { (0.5 * s * w / m, 0.5 * s * h / m) };
+                let r = self.round.clamp(0.0, 1.0) * hx.min(hy);
+                let (qx, qy) = (px.abs() - hx + r, py.abs() - hy + r);
+                (qx.max(0.0).hypot(qy.max(0.0))) + qx.max(qy).min(0.0) - r
+            }
+            MaskShape::Band => py.abs() - 0.5 * s * h / m,
+            MaskShape::Heart => sd_heart(px / s * 1.25, py / s * 1.25 + 0.55) * s / 1.25,
+            MaskShape::Star => sd_star5(px, py, 0.5 * s, 0.45),
+        };
+        let soft = (self.feather.clamp(0.0, 1.0) * 0.25).max(1.0 / m);
+        let a = (0.5 - d / soft).clamp(0.0, 1.0);
+        if self.invert { 1.0 - a } else { a }
+    }
+
+    /// The mask as 8-bit opacity values, row by row.
+    pub fn render(&self, w: usize, h: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                out.push((self.alpha(x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32) * 255.0).round() as u8);
+            }
+        }
+        out
+    }
+
+    /// Binary PGM image of the mask (FFmpeg reads it directly).
+    pub fn pgm(&self, w: usize, h: usize) -> Vec<u8> {
+        let mut out = format!("P5\n{w} {h}\n255\n").into_bytes();
+        out.extend(self.render(w, h));
+        out
+    }
+}
+
+/// Multiply an RGBA image's alpha by a rendered mask of the same size.
+pub fn apply_mask(rgba: &mut [u8], mask: &[u8]) {
+    for (px, m) in rgba.chunks_exact_mut(4).zip(mask) {
+        px[3] = ((px[3] as u16 * *m as u16 + 127) / 255) as u8;
+    }
+}
+
+/// Signed distance to a heart about 1 unit tall, bottom tip at the origin.
+fn sd_heart(x: f32, y: f32) -> f32 {
+    let x = x.abs();
+    let dot2 = |a: f32, b: f32| a * a + b * b;
+    if y + x > 1.0 {
+        dot2(x - 0.25, y - 0.75).sqrt() - std::f32::consts::SQRT_2 / 4.0
+    } else {
+        let k = 0.5 * (x + y).max(0.0);
+        dot2(x, y - 1.0).min(dot2(x - k, y - k)).sqrt() * (x - y).signum()
+    }
+}
+
+/// Signed distance to a five-point star of outer radius `r`.
+fn sd_star5(x: f32, y: f32, r: f32, rf: f32) -> f32 {
+    let (k1x, k1y) = (0.809_017_f32, -0.587_785_f32);
+    let (k2x, k2y) = (-k1x, k1y);
+    let (mut px, mut py) = (x.abs(), y);
+    let d1 = 2.0 * (k1x * px + k1y * py).max(0.0);
+    px -= d1 * k1x;
+    py -= d1 * k1y;
+    let d2 = 2.0 * (k2x * px + k2y * py).max(0.0);
+    px -= d2 * k2x;
+    py -= d2 * k2y;
+    px = px.abs();
+    py -= r;
+    let (bax, bay) = (rf * -k1y, rf * k1x - 1.0);
+    let hh = ((px * bax + py * bay) / (bax * bax + bay * bay)).clamp(0.0, r);
+    (px - bax * hh).hypot(py - bay * hh) * (py * bax - px * bay).signum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,4 +457,22 @@ mod tests {
         assert_eq!(super::atempo(4.0), "atempo=2,atempo=2.0000");
         assert_eq!(super::atempo(0.25), "atempo=0.5,atempo=0.5000");
     }
+
+    #[test]
+    fn mask_shapes() {
+        use super::{Mask, MaskShape};
+        let at = |m: &Mask, x: f32, y: f32| m.alpha(x, y, 100.0, 200.0);
+        for shape in [MaskShape::Circle, MaskShape::Rect, MaskShape::Heart, MaskShape::Star, MaskShape::Band] {
+            let m = Mask { shape, size: 0.8, feather: 0.0, ..Default::default() };
+            assert_eq!(at(&m, 50.0, 100.0), 1.0, "{shape:?} keeps the centre");
+            assert_eq!(at(&m, 1.0, 1.0), 0.0, "{shape:?} cuts the corner");
+            let inv = Mask { invert: true, ..m };
+            assert_eq!(at(&inv, 1.0, 1.0), 1.0);
+        }
+        assert_eq!(at(&Mask::default(), 0.0, 0.0), 1.0, "no mask keeps everything");
+        let pgm = Mask { shape: MaskShape::Circle, ..Default::default() }.pgm(4, 2);
+        assert!(pgm.starts_with(b"P5\n4 2\n255\n"));
+        assert_eq!(pgm.len(), 11 + 8);
+    }
 }
+

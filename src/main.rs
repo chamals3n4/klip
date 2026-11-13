@@ -8,6 +8,7 @@ mod fx;
 mod media;
 mod model;
 mod store;
+mod templates;
 mod theme;
 mod ui;
 

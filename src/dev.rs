@@ -9,7 +9,7 @@
 //! - `KLIP_DEMO_FULLSCREEN=1` open the full-screen preview
 //! - `KLIP_DEMO_TRANSITION=slideleft`, `KLIP_DEMO_FILTER=film`,
 //!   `KLIP_DEMO_TRANSFORM=scale,x,y,deg`, `KLIP_DEMO_SPEED=2`,
-//!   `KLIP_DEMO_AFADE=in,out` pre-apply effects
+//!   `KLIP_DEMO_AFADE=in,out`, `KLIP_DEMO_TEMPLATE=motivation` pre-apply effects
 //! - `KLIP_DEMO_NAME`, `KLIP_DEMO_ASPECT=9:16` name / ratio of the project
 //!   created from media on the command line
 //! - `KLIP_DEMO_HOME=1`        go back to the home screen once the demo is set up
@@ -58,6 +58,12 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
         app.dev.applied = true;
         if let Some(t) = std::env::var("KLIP_DEMO_SEEK").ok().and_then(|v| v.parse::<f64>().ok()) {
             app.seek(t);
+        }
+        // KLIP_DEMO_TEMPLATE=motivation  → apply a template
+        if let Ok(name) = std::env::var("KLIP_DEMO_TEMPLATE") {
+            if let Some(t) = crate::templates::Template::ALL.into_iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(&name)) {
+                app.apply_template(t);
+            }
         }
         app.selection = match std::env::var("KLIP_DEMO_SELECT").as_deref() {
             Ok("video") => app.project.video.first().map_or(Selection::None, |c| Selection::Video(c.id)),
@@ -137,6 +143,7 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
         match std::env::var("KLIP_DEMO_VTAB").as_deref() {
             Ok("speed") => app.video_tab = crate::app::VideoTab::Speed,
             Ok("audio") => app.video_tab = crate::app::VideoTab::Audio,
+            Ok("mask") => app.video_tab = crate::app::VideoTab::Mask,
             _ => {}
         }
         if std::env::var_os("KLIP_DEMO_PLAY").is_some() {
@@ -148,6 +155,7 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
             Ok("captions") => LeftTab::Captions,
             Ok("transitions") => LeftTab::Transitions,
             Ok("filters") => LeftTab::Filters,
+            Ok("templates") => LeftTab::Templates,
             _ => LeftTab::Media,
         };
     }
