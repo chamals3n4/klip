@@ -30,6 +30,7 @@ pub enum VideoTab {
     Adjust,
     Audio,
     Speed,
+    Mask,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,7 @@ pub enum LeftTab {
     Captions,
     Transitions,
     Filters,
+    Templates,
 }
 
 /// Payload for dragging a library item onto the timeline.
@@ -189,32 +191,45 @@ pub struct Layer {
     pub media: Option<Id>,
     pub clip: Option<Id>,
     raw: Option<Frame>,
-    graded: Option<crate::fx::Adjust>,
+    /// Grade and mask the texture was last built with.
+    graded: Option<(crate::fx::Adjust, crate::fx::Mask)>,
+    /// Rendered mask for the current frame size: (mask, w, h, opacity).
+    mask_cache: Option<(crate::fx::Mask, usize, usize, Vec<u8>)>,
     requested: Option<(Id, i64)>,
     grabber: Grabber,
 }
 
 impl Layer {
     fn new(ctx: egui::Context) -> Self {
-        Self { tex: None, blur: None, media: None, clip: None, raw: None, graded: None, requested: None, grabber: Grabber::new(ctx) }
+        Self { tex: None, blur: None, media: None, clip: None, raw: None, graded: None, mask_cache: None, requested: None, grabber: Grabber::new(ctx) }
     }
 
     /// (Re)build the textures from the raw frame with `grade` applied.
-    fn upload(&mut self, ctx: &egui::Context, grade: crate::fx::Adjust) {
+    fn upload(&mut self, ctx: &egui::Context, grade: crate::fx::Adjust, mask: crate::fx::Mask) {
         let Some(raw) = &self.raw else { return };
         let mut f = raw.clone();
         grade.apply(&mut f.rgba);
+        // The blurred background is made from the whole frame, before masking.
+        let tiny = to_image(&media::tiny_blur(&f, 40));
+        if !mask.is_none() {
+            let fresh = self.mask_cache.as_ref().is_some_and(|(m, w, h, _)| *m == mask && *w == f.w && *h == f.h);
+            if !fresh {
+                self.mask_cache = Some((mask, f.w, f.h, mask.render(f.w, f.h)));
+            }
+            if let Some((_, _, _, alpha)) = &self.mask_cache {
+                crate::fx::apply_mask(&mut f.rgba, alpha);
+            }
+        }
         let img = to_image(&f);
         match &mut self.tex {
             Some(t) => t.set(img, TextureOptions::LINEAR),
             None => self.tex = Some(ctx.load_texture("preview_layer", img, TextureOptions::LINEAR)),
         }
-        let tiny = to_image(&media::tiny_blur(&f, 40));
         match &mut self.blur {
             Some(t) => t.set(tiny, TextureOptions::LINEAR),
             None => self.blur = Some(ctx.load_texture("preview_layer_blur", tiny, TextureOptions::LINEAR)),
         }
-        self.graded = Some(grade);
+        self.graded = Some((grade, mask));
     }
 }
 
@@ -989,6 +1004,18 @@ impl KlipApp {
         self.invalidate_preview();
     }
 
+    pub fn apply_template(&mut self, t: crate::templates::Template) {
+        self.commit_now();
+        match t.apply(&mut self.project) {
+            Ok(()) => {
+                self.selection = Selection::None;
+                self.invalidate_preview();
+                self.toast(ToastKind::Success, format!("“{}” applied. Click a text to make it yours.", t.name()));
+            }
+            Err(e) => self.toast(ToastKind::Info, e),
+        }
+    }
+
     pub fn apply_filter(&mut self, preset: crate::fx::FilterPreset) {
         let Some(i) = self.target_clip() else {
             self.toast(ToastKind::Info, "Add a clip to use filters");
@@ -1160,12 +1187,12 @@ impl KlipApp {
 
     /// Upload a decoded frame into a preview layer, applying the clip's grade.
     fn show_frame(&mut self, slot: usize, clip_id: Id, media_id: Id, f: Frame) {
-        let grade = self
+        let (grade, mask) = self
             .project
             .video
             .iter()
             .find(|c| c.id == clip_id)
-            .map(|c| c.grade())
+            .map(|c| (c.grade(), c.mask))
             .unwrap_or_default();
         if slot == 0 {
             self.first_frame = true;
@@ -1184,7 +1211,7 @@ impl KlipApp {
         l.raw = Some(f);
         l.media = Some(media_id);
         l.clip = Some(clip_id);
-        l.upload(&self.ctx, grade);
+        l.upload(&self.ctx, grade, mask);
     }
 
     /// Keep layer `slot` showing main-track clip `idx` at the playhead.
@@ -1232,10 +1259,10 @@ impl KlipApp {
             }
         }
         // Re-grade instantly when filter/adjust values change.
-        let grade = clip.grade();
+        let grade = (clip.grade(), clip.mask);
         if self.layers[slot].graded != Some(grade) {
             let ctx = self.ctx.clone();
-            self.layers[slot].upload(&ctx, grade);
+            self.layers[slot].upload(&ctx, grade.0, grade.1);
         }
     }
 

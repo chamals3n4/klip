@@ -1,7 +1,7 @@
 //! Project data model. Everything here is plain data (serde-serialisable) so
 //! undo/redo is just cloning the project and saving is just writing JSON.
 
-use crate::fx::{Adjust, FilterPreset, Transition};
+use crate::fx::{Adjust, FilterPreset, Mask, Transition};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -105,6 +105,9 @@ pub struct VideoClip {
     /// on the timeline.
     #[serde(default = "one")]
     pub speed: f32,
+    /// Cut-out shape; moves, scales and rotates with the clip.
+    #[serde(default)]
+    pub mask: Mask,
 }
 
 fn one() -> f32 {
@@ -133,6 +136,7 @@ impl VideoClip {
             audio_fade_in: 0.0,
             audio_fade_out: 0.0,
             speed: 1.0,
+            mask: Mask::default(),
         }
     }
 

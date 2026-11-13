@@ -89,7 +89,7 @@ fn video_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
     ui.add_space(10.0);
     let has_audio = media.as_ref().is_some_and(|m| m.has_audio);
     let is_image = media.as_ref().is_some_and(|m| m.kind == MediaKind::Image);
-    let mut tabs = vec![(VideoTab::Basic, "Basic"), (VideoTab::Adjust, "Adjust")];
+    let mut tabs = vec![(VideoTab::Basic, "Basic"), (VideoTab::Adjust, "Adjust"), (VideoTab::Mask, "Mask")];
     if has_audio {
         tabs.push((VideoTab::Audio, "Audio"));
     } else if app.video_tab == VideoTab::Audio {
@@ -173,6 +173,41 @@ fn video_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
                 });
             }
         }
+        VideoTab::Mask => {
+            section(ui, "Shape");
+            let before = app.project.video[i].mask;
+            let mut m = before;
+            mask_picker(ui, &mut m.shape);
+            if !m.is_none() {
+                ui.add_space(10.0);
+                section(ui, "Mask");
+                let mut size = m.size * 100.0;
+                if slider_row(ui, "Size", &mut size, 10.0..=150.0, 80.0, num("%", 0, 1.0)) {
+                    m.size = size / 100.0;
+                }
+                let mut feather = m.feather * 100.0;
+                if slider_row(ui, "Feather", &mut feather, 0.0..=100.0, 4.0, num("%", 0, 1.0)) {
+                    m.feather = feather / 100.0;
+                }
+                if m.shape == crate::fx::MaskShape::Rect {
+                    ui.horizontal(|ui| {
+                        ui.add_sized(Vec2::new(80.0, 28.0), egui::Label::new(RichText::new("Ratio").color(TEXT_DIM)));
+                        segmented(ui, &mut m.ratio, &[(0.0, "Clip"), (1.0, "1:1"), (0.8, "4:5"), (16.0 / 9.0, "16:9")]);
+                    });
+                    let mut round = m.round * 100.0;
+                    if slider_row(ui, "Corners", &mut round, 0.0..=100.0, 20.0, num("%", 0, 1.0)) {
+                        m.round = round / 100.0;
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.add_sized(Vec2::new(80.0, 28.0), egui::Label::new(RichText::new("Keep").color(TEXT_DIM)));
+                    segmented(ui, &mut m.invert, &[(false, "Inside"), (true, "Outside")]);
+                });
+            }
+            if m != before {
+                app.project.video[i].mask = m;
+            }
+        }
         VideoTab::Speed => {
             section(ui, "Speed");
             let c = &mut app.project.video[i];
@@ -232,6 +267,10 @@ fn video_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
             let mut tp = a.temperature * 100.0;
             if slider_row(ui, "Temperature", &mut tp, -100.0..=100.0, 0.0, num("", 0, 1.0)) {
                 a.temperature = tp / 100.0;
+            }
+            let mut tn = a.tint * 100.0;
+            if slider_row(ui, "Tint", &mut tn, -100.0..=100.0, 0.0, num("", 0, 1.0)) {
+                a.tint = tn / 100.0;
             }
             let mut fd = a.fade * 100.0;
             if slider_row(ui, "Fade", &mut fd, 0.0..=100.0, 0.0, num("", 0, 1.0)) {
@@ -591,4 +630,52 @@ fn speed_presets(ui: &mut egui::Ui, speed: &mut f32) {
 fn fade_note(ui: &mut egui::Ui) {
     ui.add_space(2.0);
     ui.label(RichText::new("Fades the sound only. Use Basic › Fade to fade the picture too.").size(12.0).color(TEXT_FAINT));
+}
+
+/// Grid of mask shapes; each icon is drawn by the mask itself.
+fn mask_picker(ui: &mut egui::Ui, shape: &mut crate::fx::MaskShape) {
+    use crate::fx::{Mask, MaskShape};
+    let gap = 8.0;
+    let w = ((ui.available_width() - gap * 2.0) / 3.0).floor();
+    for row in MaskShape::ALL.chunks(3) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for s in row {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 72.0), Sense::click());
+                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                let on = *shape == *s;
+                let h = anim(ui, ("mask_h", s.label()), resp.hovered());
+                let t = anim(ui, ("mask_s", s.label()), on);
+                let p = ui.painter();
+                p.rect_filled(rect, CornerRadius::same(R_MD), mix(mix(BG2, BG3, h * 0.7), ACCENT.gamma_multiply(0.14), t));
+                p.rect_stroke(rect, CornerRadius::same(R_MD), Stroke::new(1.0 + t * 0.5, mix(BORDER, ACCENT, t)), StrokeKind::Inside);
+                let icon = egui::Rect::from_center_size(rect.center() - Vec2::new(0.0, 9.0), Vec2::splat(30.0));
+                let col = mix(TEXT_DIM, ACCENT_HI, t);
+                if *s == MaskShape::None {
+                    p.circle_stroke(icon.center(), 12.0, Stroke::new(1.6, col));
+                    p.line_segment([icon.center() + Vec2::new(-8.5, 8.5), icon.center() + Vec2::new(8.5, -8.5)], Stroke::new(1.6, col));
+                } else {
+                    let id = egui::Id::new(("mask_icon", s.label()));
+                    let tex = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(id)).unwrap_or_else(|| {
+                        let n = 60;
+                        let m = Mask { shape: *s, size: 0.9, feather: 0.0, round: 0.3, invert: false, ratio: 0.0 };
+                        let alpha = m.render(n, if *s == MaskShape::Rect || *s == MaskShape::Band { n * 3 / 4 } else { n });
+                        let h = alpha.len() / n;
+                        let img = egui::ColorImage::from_rgba_unmultiplied([n, h], &alpha.iter().flat_map(|a| [255, 255, 255, *a]).collect::<Vec<u8>>());
+                        let tex = ui.ctx().load_texture(format!("mask_icon_{}", s.label()), img, egui::TextureOptions::LINEAR);
+                        ui.ctx().data_mut(|d| d.insert_temp(id, tex.clone()));
+                        tex
+                    });
+                    let [tw, th] = tex.size();
+                    let r = egui::Rect::from_center_size(icon.center(), Vec2::new(30.0, 30.0 * th as f32 / tw as f32));
+                    p.image(tex.id(), r, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), col);
+                }
+                p.text(rect.center_bottom() - Vec2::new(0.0, 14.0), egui::Align2::CENTER_CENTER, s.label(), egui::FontId::proportional(11.5), mix(TEXT_DIM, TEXT, t.max(h)));
+                if resp.clicked() {
+                    *shape = *s;
+                }
+            }
+        });
+        ui.add_space(gap);
+    }
 }

@@ -128,9 +128,21 @@ pub fn build_args(p: &Project, s: &ExportSettings, tmp: &Path) -> Result<Vec<Str
             String::new()
         };
         let (dx, dy) = ((c.x * w as f32).round() as i32, (c.y * h as f32).round() as i32);
+        // Mask: a grayscale image of the shape becomes the clip's alpha.
+        let masked = if c.mask.is_none() {
+            String::new()
+        } else {
+            let file = tmp.join(format!("mask{i}.pgm"));
+            std::fs::write(&file, c.mask.pgm(fw as usize, fh as usize)).map_err(|e| e.to_string())?;
+            args.extend(["-loop", "1", "-framerate", "30"].map(String::from));
+            args.extend(["-t".into(), format!("{dur:.3}"), "-i".into(), file.to_string_lossy().into_owned()]);
+            let mi = input;
+            input += 1;
+            format!(",format=rgba[fs{i}];[{mi}:v]format=gray,setsar=1[mk{i}];[fs{i}][mk{i}]alphamerge")
+        };
         let _ = write!(
             fg,
-            "[f{i}]scale={fw}:{fh}:flags=bicubic{rot}[fg{i}];[bg{i}][fg{i}]overlay=x=(W-w)/2+({dx}):y=(H-h)/2+({dy}):eof_action=pass,format=yuv420p,setsar=1"
+            "[f{i}]scale={fw}:{fh}:flags=bicubic{masked}{rot}[fg{i}];[bg{i}][fg{i}]overlay=x=(W-w)/2+({dx}):y=(H-h)/2+({dy}):eof_action=pass,format=yuv420p,setsar=1"
         );
         if c.fade_in > 0.0 {
             let _ = write!(fg, ",fade=t=in:st=0:d={:.3}", c.fade_in);
@@ -406,6 +418,11 @@ mod tests {
         p.video[1].adjust.saturation = 1.4;
         p.video[1].transition = Some(crate::fx::Transition { kind: crate::fx::TransitionKind::Mix, dur: 0.4 });
         p.video[3].fade_out = 0.4;
+        // Masks: on a rotated clip, a photo, and inverted.
+        use crate::fx::{Mask, MaskShape};
+        p.video[0].mask = Mask { shape: MaskShape::Circle, ..Default::default() };
+        p.video[2].mask = Mask { shape: MaskShape::Heart, feather: 0.2, ..Default::default() };
+        p.video[3].mask = Mask { shape: MaskShape::Band, invert: true, size: 0.5, ..Default::default() };
         // Speed: 2× (2 s → 1 s) and 0.5× (1 s → 2 s).
         p.video[1].set_speed(2.0);
         p.video[3].set_speed(0.5);

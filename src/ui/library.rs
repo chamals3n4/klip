@@ -19,6 +19,7 @@ pub fn library(app: &mut KlipApp, ui: &mut egui::Ui) {
         LeftTab::Captions => captions_tab(app, ui),
         LeftTab::Transitions => transitions_tab(app, ui),
         LeftTab::Filters => filters_tab(app, ui),
+        LeftTab::Templates => templates_tab(app, ui),
     });
 }
 
@@ -30,13 +31,20 @@ fn tabs(app: &mut KlipApp, ui: &mut egui::Ui) {
         (LeftTab::Captions, ph::SUBTITLES, "Captions"),
         (LeftTab::Transitions, ph::ARROWS_LEFT_RIGHT, "Transitions"),
         (LeftTab::Filters, ph::SWATCHES, "Filters"),
+        (LeftTab::Templates, ph::SQUARES_FOUR, "Templates"),
     ];
     let full = ui.available_rect_before_wrap();
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), 58.0));
     ui.allocate_rect(bar, Sense::hover());
-    let w = (bar.width() - 12.0) / tabs.len() as f32;
+    // Each tab is as wide as its label, plus an equal share of the spare room.
+    let font = FontId::proportional(11.0);
+    let label_w: Vec<f32> = tabs.iter().map(|(_, _, l)| ui.painter().layout_no_wrap(l.to_string(), font.clone(), TEXT).size().x).collect();
+    let spare = ((bar.width() - 12.0) - label_w.iter().sum::<f32>()) / tabs.len() as f32;
+    let mut x = bar.left() + 6.0;
     for (i, (tab, icon, label)) in tabs.iter().enumerate() {
-        let r = Rect::from_min_size(Pos2::new(bar.left() + 6.0 + w * i as f32, bar.top() + 6.0), Vec2::new(w, 48.0));
+        let w = label_w[i] + spare;
+        let r = Rect::from_min_size(Pos2::new(x, bar.top() + 6.0), Vec2::new(w, 48.0));
+        x += w;
         let resp = ui.interact(r, ui.id().with(("tab", i)), Sense::click());
         let sel = app.left_tab == *tab;
         let h = anim(ui, ("tab_h", i), resp.hovered());
@@ -670,4 +678,87 @@ fn filters_tab(app: &mut KlipApp, ui: &mut egui::Ui) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
+
+fn templates_tab(app: &mut KlipApp, ui: &mut egui::Ui) {
+    use crate::templates::Template;
+    header(ui, "Templates", |_| {});
+    tip(ui, ph::INFO, "Templates restyle the clips on your timeline and add text you can edit. Ctrl+Z undoes it.");
+    ui.add_space(12.0);
+    let ready = !app.project.video.is_empty();
+    // Preview with the user's own first clip, in the template's look.
+    let first = app.project.video.first().and_then(|c| app.project.media(c.media)).map(|m| (m.id, m.aspect()));
+    let preview = first.and_then(|(mid, aspect)| {
+        let a = app.assets.get_mut(&mid)?;
+        let raw = a.thumb_raw.clone()?;
+        let tex = a.filtered.entry(crate::fx::FilterPreset::Rose).or_insert_with(|| {
+            let mut f = raw;
+            crate::fx::FilterPreset::Rose.look().apply(&mut f.rgba);
+            ui.ctx().load_texture(format!("filter{mid}_Rose"), to_image(&f), egui::TextureOptions::LINEAR)
+        });
+        Some((tex.clone(), aspect))
+    });
+    let mut chosen = None;
+    for t in Template::ALL {
+        if template_card(ui, t, preview.as_ref(), ready) {
+            chosen = Some(t);
+        }
+        ui.add_space(14.0);
+    }
+    if !ready {
+        ui.label(RichText::new("Add clips to the timeline, then pick a template.").size(12.5).color(TEXT_DIM));
+    }
+    if let Some(t) = chosen {
+        app.apply_template(t);
+    }
+}
+
+/// A phone-shaped preview next to the template's name and description.
+fn template_card(ui: &mut egui::Ui, t: crate::templates::Template, preview: Option<&(egui::TextureHandle, f32)>, ready: bool) -> bool {
+    use crate::templates::{CARD, CARD_ROUND};
+    let width = ui.available_width();
+    let phone = Vec2::new(150.0, 150.0 * 16.0 / 9.0);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, phone.y), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let hov = anim(ui, ("tpl_h", t.name()), resp.hovered());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(R_MD + 2), mix(BG2, BG3, hov * 0.6));
+    p.rect_stroke(rect, CornerRadius::same(R_MD + 2), Stroke::new(1.0, mix(BORDER, ACCENT, hov)), StrokeKind::Inside);
+
+    // Phone: black canvas with the clip in a rounded square card.
+    let r = Rect::from_min_size(rect.min + Vec2::new(10.0, 10.0), phone - Vec2::new(0.0, 20.0));
+    let r = Rect::from_center_size(r.center(), Vec2::new(r.height() * 9.0 / 16.0, r.height()));
+    p.rect_filled(r, CornerRadius::same(R_SM), Color32::BLACK);
+    let side = r.width() * CARD;
+    let card = Rect::from_center_size(r.center(), Vec2::splat(side));
+    let radius = (side / 2.0 * CARD_ROUND).round() as u8;
+    match preview {
+        Some((tex, aspect)) => {
+            p.add(egui::epaint::RectShape::filled(card, CornerRadius::same(radius), Color32::WHITE).with_texture(tex.id(), cover_uv(*aspect, 1.0)));
+        }
+        None => {
+            p.rect_filled(card, CornerRadius::same(radius), Color32::from_rgb(120, 110, 112));
+        }
+    }
+    let word = p.layout_no_wrap(t.sample_text().to_string(), FontId::new(11.0, medium_family()), Color32::WHITE);
+    let at = card.center() - word.size() / 2.0;
+    p.galley_with_override_text_color(at + Vec2::new(0.5, 0.7), word.clone(), Color32::from_black_alpha(190));
+    p.galley(at, word, Color32::WHITE);
+
+    // Name, description and action.
+    let tx = r.right() + 16.0;
+    let text_w = rect.right() - tx - 12.0;
+    p.text(Pos2::new(tx, r.top() + 10.0), Align2::LEFT_TOP, t.name(), FontId::new(15.0, semibold_family()), TEXT);
+    let blurb = p.layout(t.blurb().to_string(), FontId::proportional(12.0), TEXT_DIM, text_w);
+    p.galley(Pos2::new(tx, r.top() + 34.0), blurb, TEXT_DIM);
+    if ready {
+        let b = Rect::from_min_size(Pos2::new(tx, r.bottom() - 34.0), Vec2::new(text_w.min(150.0), 32.0));
+        p.rect_filled(b, CornerRadius::same(R_SM), mix(ACCENT, ACCENT_HI, hov));
+        p.text(b.center(), Align2::CENTER_CENTER, "Use template", FontId::new(13.0, medium_family()), ON_ACCENT);
+    }
+    ready && resp.clicked()
 }
