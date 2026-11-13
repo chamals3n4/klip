@@ -263,15 +263,18 @@ pub fn timeline(app: &mut KlipApp, ui: &mut egui::Ui) {
             let maxh = r.height() - 18.0;
             let x0 = r.left().max(content.left());
             let x1 = r.right().min(content.right());
+            let fades = a.fades();
             let mut x = x0;
             while x < x1 {
-                let ts = a.src_in + (x - r.left()) as f64 / g.pps;
-                let v = w.get((ts * WAVE_RATE) as usize).copied().unwrap_or(0.0) * a.volume.min(1.5) / 1.5_f32.max(1.0);
+                let local = (x - r.left()) as f64 / g.pps;
+                let ts = a.src_in + local;
+                let v = w.get((ts * WAVE_RATE) as usize).copied().unwrap_or(0.0) * a.volume.min(1.5) / 1.5_f32.max(1.0) * fades.gain(local);
                 let h = (v * maxh).max(1.0);
                 wp.rect_filled(Rect::from_min_max(Pos2::new(x, base - h), Pos2::new(x + 1.6, base)), CornerRadius::ZERO, Color32::from_rgb(0x6f, 0xf0, 0xb8).gamma_multiply(0.75));
                 x += 3.0;
             }
         }
+        fade_curve(&wp, r, a.fades(), &g);
         let name = app.project.media(a.media).map(|m| m.name.clone()).unwrap_or_default();
         wp.text(Pos2::new(r.left().max(content.left()) + 8.0, r.top() + 8.0), Align2::LEFT_CENTER, format!("{} {}", ph::MUSIC_NOTE, elide(&name, r.width() - 30.0, 6.5)), FontId::proportional(10.5), Color32::WHITE);
         if sel {
@@ -837,4 +840,25 @@ fn clip_len(d: f64) -> String {
 pub fn fmt_speed(s: f64) -> String {
     let t = format!("{s:.2}");
     t.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Shade the faded part of a clip and draw the volume ramp over it.
+fn fade_curve(p: &egui::Painter, r: Rect, f: crate::model::AudioFades, g: &Geo) {
+    let top = r.top() + 2.0;
+    let bottom = r.bottom() - 2.0;
+    let ramp = |x0: f32, x1: f32, rising: bool| {
+        let (lo, hi) = if rising { (Pos2::new(x0, bottom), Pos2::new(x1, top)) } else { (Pos2::new(x0, top), Pos2::new(x1, bottom)) };
+        // Dim the silent side of the ramp.
+        let corner = if rising { Pos2::new(x0, top) } else { Pos2::new(x1, top) };
+        p.add(egui::Shape::convex_polygon(vec![lo, corner, hi], Color32::from_black_alpha(120), Stroke::NONE));
+        p.line_segment([lo, hi], Stroke::new(1.5, Color32::WHITE.gamma_multiply(0.9)));
+        // Knob where the fade meets full volume.
+        p.circle_filled(if rising { hi } else { lo }, 3.5, Color32::WHITE);
+    };
+    if f.fade_in > 0.0 {
+        ramp(r.left(), (r.left() + f.fade_in * g.pps as f32).min(r.right()), true);
+    }
+    if f.fade_out > 0.0 {
+        ramp((r.right() - f.fade_out * g.pps as f32).max(r.left()), r.right(), false);
+    }
 }

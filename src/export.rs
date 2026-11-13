@@ -160,6 +160,10 @@ pub fn build_args(p: &Project, s: &ExportSettings, tmp: &Path) -> Result<Vec<Str
         if c.fade_out > 0.0 {
             let _ = write!(fg, ",afade=t=out:st={:.3}:d={:.3}", (dur - c.fade_out as f64).max(0.0), c.fade_out);
         }
+        let sound_fade = c.audio_fades().ffmpeg(0.0);
+        if !sound_fade.is_empty() {
+            let _ = write!(fg, ",{sound_fade}");
+        }
         let _ = write!(fg, "[a{i}];");
     }
 
@@ -247,9 +251,13 @@ pub fn build_args(p: &Project, s: &ExportSettings, tmp: &Path) -> Result<Vec<Str
         let n = input;
         input += 1;
         let ms = (a.start * 1000.0).round() as i64;
+        let fade = match a.fades().ffmpeg(0.0) {
+            f if f.is_empty() => f,
+            f => format!("asetpts=PTS-STARTPTS,{f},"),
+        };
         let _ = write!(
             fg,
-            "[{n}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={:.3},adelay={ms}:all=1[m{j}];",
+            "[{n}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,{fade}volume={:.3},adelay={ms}:all=1[m{j}];",
             a.volume
         );
         music.push(format!("[m{j}]"));
@@ -406,7 +414,12 @@ mod tests {
             p.texts.push(TextClip { id, text: format!("Style {} it's: \"quoted\"\nline two", st.label()), start: i as f64, dur: 2.0, x: 0.5, y: 0.2 + i as f32 * 0.2, size: 70.0, color: [255, 214, 10], style: *st, is_caption: false });
         }
         let id = p.new_id();
-        p.audio.push(AudioClip { id, media: music.id, start: 0.5, src_in: 1.0, dur: 4.0, volume: 0.5 });
+        let mut music_clip = AudioClip::new(id, music.id, 0.5, 1.0, 4.0, 0.5);
+        music_clip.fade_in = 1.0;
+        music_clip.fade_out = 1.5;
+        p.audio.push(music_clip);
+        p.video[0].audio_fade_in = 0.5;
+        p.video[3].audio_fade_out = 0.6;
 
         let out = std::env::temp_dir().join("klip_test_out.mp4");
         let tmp = std::env::temp_dir().join("klip_test_tmp");
@@ -419,5 +432,29 @@ mod tests {
         assert_eq!((info.width, info.height), (720, 1280));
         assert!((info.duration - p.duration()).abs() < 0.15, "duration {} vs {}", info.duration, p.duration());
         assert!(info.has_audio);
+    }
+
+    /// The fade filter used by preview and export really ramps the sound.
+    #[test]
+    #[ignore]
+    fn audio_fade_filter_ramps() {
+        let f = crate::model::AudioFades { fade_in: 1.0, fade_out: 1.0, dur: 4.0 };
+        // Start 0.5 s into the fades, like a preview that begins mid-fade-in.
+        let af = f.ffmpeg(0.5);
+        let o = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "sine=f=440:r=48000:d=3.5", "-af", &af, "-f", "f32le", "-ac", "1", "-"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let s: Vec<f32> = o.stdout.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        // Peak level over 0.1 s around output time `t`.
+        let peak = |t: f64| {
+            let i = (t * 48000.0) as usize;
+            s[i.saturating_sub(1200)..(i + 1200).min(s.len())].iter().fold(0f32, |m, v| m.max(v.abs()))
+        };
+        let full = peak(1.5);
+        assert!((peak(0.05) / full - 0.55).abs() < 0.1, "starts half-way up: {}", peak(0.05) / full);
+        assert!((peak(3.0) / full - 0.5).abs() < 0.1, "half-way down: {}", peak(3.0) / full);
+        assert!(peak(3.47) / full < 0.1, "nearly silent at the end: {}", peak(3.47) / full);
     }
 }

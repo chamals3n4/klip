@@ -96,6 +96,11 @@ pub struct VideoClip {
     /// Transition into the *next* clip on the main track.
     #[serde(default)]
     pub transition: Option<Transition>,
+    /// Fades on the clip's own sound only (the picture keeps playing).
+    #[serde(default)]
+    pub audio_fade_in: f32,
+    #[serde(default)]
+    pub audio_fade_out: f32,
     /// Playback speed (0.25–4×). The clip lasts `source length / speed`
     /// on the timeline.
     #[serde(default = "one")]
@@ -125,6 +130,8 @@ impl VideoClip {
             filter_amount: 1.0,
             adjust: Adjust::default(),
             transition: None,
+            audio_fade_in: 0.0,
+            audio_fade_out: 0.0,
             speed: 1.0,
         }
     }
@@ -157,6 +164,13 @@ impl VideoClip {
         let half = (self.dur() / 2.0) as f32;
         self.fade_in = self.fade_in.min(half);
         self.fade_out = self.fade_out.min(half);
+        self.audio_fade_in = self.audio_fade_in.min(half);
+        self.audio_fade_out = self.audio_fade_out.min(half);
+    }
+
+    /// Sound fades for this clip, on the timeline.
+    pub fn audio_fades(&self) -> AudioFades {
+        AudioFades { fade_in: self.audio_fade_in, fade_out: self.audio_fade_out, dur: self.dur() }
     }
 
     pub fn grade(&self) -> Adjust {
@@ -235,11 +249,67 @@ pub struct AudioClip {
     pub src_in: f64,
     pub dur: f64,
     pub volume: f32,
+    /// Fade from / to silence, seconds.
+    #[serde(default)]
+    pub fade_in: f32,
+    #[serde(default)]
+    pub fade_out: f32,
 }
 
 impl AudioClip {
+    pub fn new(id: Id, media: Id, start: f64, src_in: f64, dur: f64, volume: f32) -> Self {
+        Self { id, media, start, src_in, dur, volume, fade_in: 0.0, fade_out: 0.0 }
+    }
+
     pub fn end(&self) -> f64 {
         self.start + self.dur
+    }
+
+    pub fn fades(&self) -> AudioFades {
+        AudioFades { fade_in: self.fade_in, fade_out: self.fade_out, dur: self.dur }
+    }
+}
+
+/// Fade in / out on a stretch of sound `dur` seconds long.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioFades {
+    pub fade_in: f32,
+    pub fade_out: f32,
+    pub dur: f64,
+}
+
+impl AudioFades {
+    pub fn is_none(&self) -> bool {
+        self.fade_in <= 0.0 && self.fade_out <= 0.0
+    }
+
+    /// Gain (0–1) at `local` seconds in.
+    pub fn gain(&self, local: f64) -> f32 {
+        let mut g = 1.0f32;
+        if self.fade_in > 0.0 {
+            g = g.min((local as f32 / self.fade_in).clamp(0.0, 1.0));
+        }
+        if self.fade_out > 0.0 {
+            g = g.min(((self.dur - local) as f32 / self.fade_out).clamp(0.0, 1.0));
+        }
+        g
+    }
+
+    /// FFmpeg `volume` filter applying these fades to a stream that starts
+    /// `offset` seconds into the sound. Empty when there are no fades.
+    pub fn ffmpeg(&self, offset: f64) -> String {
+        if self.is_none() {
+            return String::new();
+        }
+        let mut terms = vec![];
+        if self.fade_in > 0.0 {
+            terms.push(format!("min(1,(t+{offset:.3})/{:.3})", self.fade_in));
+        }
+        if self.fade_out > 0.0 {
+            terms.push(format!("min(1,max(0,{:.3}-t-{offset:.3})/{:.3})", self.dur, self.fade_out));
+        }
+        // Small frames so the gain (evaluated per frame) ramps smoothly.
+        format!("asetnsamples=n=256:p=0,volume='{}':eval=frame", terms.join("*"))
     }
 }
 
@@ -399,6 +469,8 @@ impl Project {
         // original outgoing transition and fade-out.
         self.video[i].transition = None;
         self.video[i].fade_out = 0.0;
+        self.video[i].audio_fade_out = 0.0;
+        right.audio_fade_in = 0.0;
         right.src_in = cut;
         let id = right.id;
         self.video.insert(i + 1, right);
@@ -432,8 +504,10 @@ impl Project {
         right.start = t;
         right.src_in = c.src_in + local;
         right.dur = c.dur - local;
+        right.fade_in = 0.0;
         right.id = self.new_id();
         self.audio[i].dur = local;
+        self.audio[i].fade_out = 0.0;
         let nid = right.id;
         self.audio.push(right);
         Some(nid)
@@ -572,5 +646,28 @@ mod tests {
         assert_eq!((p.video[0].src_out, p.video[1].src_in), (4.0, 4.0));
         assert_eq!((p.video[0].dur(), p.video[1].dur()), (1.0, 1.0));
         assert_eq!(p.video[1].speed, 2.0);
+    }
+
+    #[test]
+    fn audio_fades() {
+        let f = AudioFades { fade_in: 1.0, fade_out: 2.0, dur: 10.0 };
+        assert_eq!(f.gain(0.0), 0.0);
+        assert_eq!(f.gain(0.5), 0.5);
+        assert_eq!(f.gain(5.0), 1.0);
+        assert_eq!(f.gain(9.0), 0.5);
+        assert_eq!(f.gain(10.0), 0.0);
+        assert_eq!(AudioFades::default().ffmpeg(0.0), "");
+
+        // Splitting keeps the fade-in on the left and the fade-out on the right.
+        let mut p = Project::default();
+        let mut a = AudioClip::new(1, 1, 0.0, 0.0, 10.0, 1.0);
+        a.fade_in = 1.0;
+        a.fade_out = 2.0;
+        p.audio.push(a);
+        p.next_id = 2;
+        let right = p.split_audio(1, 4.0).unwrap();
+        let (l, r) = (&p.audio[0], p.audio.iter().find(|c| c.id == right).unwrap());
+        assert_eq!((l.fade_in, l.fade_out), (1.0, 0.0));
+        assert_eq!((r.fade_in, r.fade_out), (0.0, 2.0));
     }
 }
