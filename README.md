@@ -81,9 +81,9 @@ You can also open files straight away: `klip clip.mp4 song.mp3 subs.srt`
 - [x] Timeline editing, text, captions, music, export
 - [x] Transitions, fades, filters and free transform (move, scale, rotate)
 - [x] Project manager to browse, open and organise your projects
+- [x] Speed control
 - [ ] Audio fade in / out
 - [ ] Auto captions (on-device Whisper)
-- [x] Speed control
 - [ ] Templates for common Reel formats
 
 ## How it works
