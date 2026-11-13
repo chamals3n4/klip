@@ -922,7 +922,7 @@ impl KlipApp {
             return;
         }
         let id = self.project.new_id();
-        self.project.audio.push(AudioClip { id, media: media_id, start: at.max(0.0), src_in: 0.0, dur: m.duration, volume: 0.8 });
+        self.project.audio.push(AudioClip::new(id, media_id, at.max(0.0), 0.0, m.duration, 0.8));
         self.selection = Selection::Audio(id);
     }
 
@@ -1325,7 +1325,8 @@ impl KlipApp {
                 if let Some(m) = self.project.media(c.media).cloned() {
                     if m.has_audio {
                         let local = (t - s).clamp(0.0, c.dur());
-                        self.audio.play(key.clone(), &m.path, c.src_at(local), c.dur() - local, c.speed(), c.volume);
+                        let f = (c.audio_fades(), local);
+                        self.audio.play(key.clone(), &m.path, c.src_at(local), c.dur() - local, c.speed(), c.volume, f);
                     }
                 }
                 self.voices.push(key);
@@ -1337,7 +1338,7 @@ impl KlipApp {
                         let off = t - a.start;
                         let len = (a.end() - t).min(total - t);
                         let path = am.path.clone();
-                        self.audio.play(k, &path, a.src_in + off, len, 1.0, a.volume);
+                        self.audio.play(k, &path, a.src_in + off, len, 1.0, a.volume, (a.fades(), off));
                     }
                 }
             }

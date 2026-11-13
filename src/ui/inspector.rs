@@ -258,6 +258,13 @@ fn video_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
         VideoTab::Audio => {
             section(ui, "Volume");
             volume_row(ui, &mut app.project.video[i].volume);
+            ui.add_space(10.0);
+            section(ui, "Fade");
+            let c = &mut app.project.video[i];
+            let max = (c.dur() as f32 / 2.0).clamp(0.1, 10.0);
+            slider_row(ui, "Fade in", &mut c.audio_fade_in, 0.0..=max, 0.0, num("s", 1, 0.1));
+            slider_row(ui, "Fade out", &mut c.audio_fade_out, 0.0..=max, 0.0, num("s", 1, 0.1));
+            fade_note(ui);
         }
     }
     actions(app, ui);
@@ -461,6 +468,11 @@ fn audio_props(app: &mut KlipApp, ui: &mut egui::Ui, id: u64) {
     let a = &mut app.project.audio[i];
     volume_row(ui, &mut a.volume);
     ui.add_space(10.0);
+    section(ui, "Fade");
+    let max = (a.dur as f32 / 2.0).clamp(0.1, 10.0);
+    slider_row(ui, "Fade in", &mut a.fade_in, 0.0..=max, 0.0, num("s", 1, 0.1));
+    slider_row(ui, "Fade out", &mut a.fade_out, 0.0..=max, 0.0, num("s", 1, 0.1));
+    ui.add_space(10.0);
     section(ui, "Timing");
     let max = media.map(|m| m.duration).unwrap_or(0.0);
     row(ui, "Start", |ui| {
@@ -574,4 +586,9 @@ fn speed_presets(ui: &mut egui::Ui, speed: &mut f32) {
         }
     });
     ui.add_space(6.0);
+}
+
+fn fade_note(ui: &mut egui::Ui) {
+    ui.add_space(2.0);
+    ui.label(RichText::new("Fades the sound only. Use Basic › Fade to fade the picture too.").size(12.0).color(TEXT_FAINT));
 }

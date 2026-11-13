@@ -11,6 +11,9 @@ use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Sound fades, and how many seconds into them a voice starts.
+pub type Fade = (crate::model::AudioFades, f64);
+
 struct Voice {
     child: Option<Child>,
     started: Instant,
@@ -19,6 +22,7 @@ struct Voice {
     dur: f64,
     speed: f64,
     volume: f32,
+    fade: Fade,
     retried: bool,
     log: Arc<Mutex<String>>,
 }
@@ -41,9 +45,20 @@ impl Default for AudioPreview {
 }
 
 /// Play `dur` seconds of output, reading the source from `src_t` at `speed`.
-fn spawn(path: &Path, src_t: f64, dur: f64, speed: f64, volume: f32, log: Arc<Mutex<String>>) -> Option<Child> {
+/// `fades` apply on the timeline, starting `offset` seconds into them.
+fn spawn(path: &Path, src_t: f64, dur: f64, speed: f64, volume: f32, (fades, offset): Fade, log: Arc<Mutex<String>>) -> Option<Child> {
+    let mut chain: Vec<String> = vec![];
     let tempo = crate::fx::atempo(speed);
-    let af = if tempo.is_empty() { format!("volume={volume:.3}") } else { format!("{tempo},volume={volume:.3}") };
+    if !tempo.is_empty() {
+        chain.push(tempo);
+    }
+    // After atempo, `t` is timeline time.
+    let fade = fades.ffmpeg(offset);
+    if !fade.is_empty() {
+        chain.push(fade);
+    }
+    chain.push(format!("volume={volume:.3}"));
+    let af = chain.join(",");
     let mut child = ffmpeg()
         .args(["-ss", &format!("{:.3}", src_t.max(0.0))])
         .args(["-t", &format!("{:.3}", dur * speed)])
@@ -69,19 +84,21 @@ impl AudioPreview {
         self.voices.contains_key(key)
     }
 
-    /// Play `dur` seconds (timeline time) of `path` from `src_t`, at `speed`.
-    pub fn play(&mut self, key: String, path: &Path, src_t: f64, dur: f64, speed: f64, volume: f32) {
+    /// Play `dur` seconds (timeline time) of `path` from `src_t`, at `speed`,
+    /// with `fade` = (fades, how far into them playback starts).
+    #[allow(clippy::too_many_arguments)]
+    pub fn play(&mut self, key: String, path: &Path, src_t: f64, dur: f64, speed: f64, volume: f32, fade: Fade) {
         self.stop(&key);
         let silent = dur <= 0.02 || volume <= 0.001 || self.muted;
         let log = Arc::new(Mutex::new(String::new()));
         // Silent voices are still tracked so we don't retry every frame.
-        let child = if silent { None } else { spawn(path, src_t, dur, speed, volume, log.clone()) };
+        let child = if silent { None } else { spawn(path, src_t, dur, speed, volume, fade, log.clone()) };
         if self.debug {
             eprintln!("[audio] start {key} @{src_t:.2}s for {dur:.2}s vol {volume:.2} → {}", if child.is_some() { "ok" } else { "none" });
         }
         self.voices.insert(
             key,
-            Voice { child, started: Instant::now(), path: path.to_path_buf(), src_t, dur, speed, volume, retried: false, log },
+            Voice { child, started: Instant::now(), path: path.to_path_buf(), src_t, dur, speed, volume, fade, retried: false, log },
         );
     }
 
@@ -102,8 +119,9 @@ impl AudioPreview {
                 v.started = Instant::now();
                 v.src_t += age * v.speed;
                 v.dur -= age;
+                v.fade.1 += age;
                 v.log = Arc::new(Mutex::new(String::new()));
-                v.child = spawn(&v.path, v.src_t, v.dur, v.speed, v.volume, v.log.clone());
+                v.child = spawn(&v.path, v.src_t, v.dur, v.speed, v.volume, v.fade, v.log.clone());
             }
         }
     }

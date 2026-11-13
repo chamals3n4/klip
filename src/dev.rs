@@ -8,7 +8,8 @@
 //! - `KLIP_DEMO_EXPORT=open|run` open the export dialog (and start rendering)
 //! - `KLIP_DEMO_FULLSCREEN=1` open the full-screen preview
 //! - `KLIP_DEMO_TRANSITION=slideleft`, `KLIP_DEMO_FILTER=film`,
-//!   `KLIP_DEMO_TRANSFORM=scale,x,y,deg`, `KLIP_DEMO_SPEED=2` pre-apply effects
+//!   `KLIP_DEMO_TRANSFORM=scale,x,y,deg`, `KLIP_DEMO_SPEED=2`,
+//!   `KLIP_DEMO_AFADE=in,out` pre-apply effects
 //! - `KLIP_DEMO_NAME`, `KLIP_DEMO_ASPECT=9:16` name / ratio of the project
 //!   created from media on the command line
 //! - `KLIP_DEMO_HOME=1`        go back to the home screen once the demo is set up
@@ -78,6 +79,18 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
                 }
             }
         }
+        // KLIP_DEMO_AFADE=in,out  → sound fades on the first music and video clip
+        if let Ok(v) = std::env::var("KLIP_DEMO_AFADE") {
+            let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if let [fi, fo] = n.as_slice() {
+                if let Some(a) = app.project.audio.first_mut() {
+                    (a.fade_in, a.fade_out) = (*fi, *fo);
+                }
+                if let Some(c) = app.project.video.first_mut() {
+                    (c.audio_fade_in, c.audio_fade_out) = (*fi, *fo);
+                }
+            }
+        }
         // KLIP_DEMO_SPEED=2  → first clip
         if let Some(v) = std::env::var("KLIP_DEMO_SPEED").ok().and_then(|v| v.parse::<f32>().ok()) {
             if let Some(c) = app.project.video.first_mut() {
@@ -121,8 +134,10 @@ pub fn tick(app: &mut KlipApp, ctx: &egui::Context) {
             }
             _ => {}
         }
-        if std::env::var("KLIP_DEMO_VTAB").as_deref() == Ok("speed") {
-            app.video_tab = crate::app::VideoTab::Speed;
+        match std::env::var("KLIP_DEMO_VTAB").as_deref() {
+            Ok("speed") => app.video_tab = crate::app::VideoTab::Speed,
+            Ok("audio") => app.video_tab = crate::app::VideoTab::Audio,
+            _ => {}
         }
         if std::env::var_os("KLIP_DEMO_PLAY").is_some() {
             app.toggle_play();
